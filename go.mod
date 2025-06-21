@@ -1,4 +1,4 @@
-module email-pdf-downloader
+module emaild
 
 go 1.24
 
