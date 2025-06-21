@@ -1,0 +1,31 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "email-pdf-downloader",
+  "outputfilename": "邮件附件下载器",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev",
+    "package": {
+      "manager": "npm"
+    }
+  },
+  "backend": {
+    "dir": "./backend"
+  },
+  "author": {
+    "name": "Developer",
+    "email": "developer@example.com"
+  },
+  "info": {
+    "companyName": "EmailPDFDownloader",
+    "productName": "邮件附件下载器",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2025",
+    "comments": "现代化邮件附件自动下载工具"
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": ""
+} 
