@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"email-pdf-downloader/backend/database"
-	"email-pdf-downloader/backend/models"
-	"email-pdf-downloader/backend/services"
+	"emaild/backend/database"
+	"emaild/backend/models"
+	"emaild/backend/services"
 
 	"github.com/sirupsen/logrus"
 	"github.com/wailsapp/wails/v2/pkg/runtime"

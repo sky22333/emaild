@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"email-pdf-downloader/backend/database"
-	"email-pdf-downloader/backend/models"
-	"email-pdf-downloader/backend/utils"
+	"emaild/backend/database"
+	"emaild/backend/models"
+	"emaild/backend/utils"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/emersion/go-imap"

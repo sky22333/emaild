@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"email-pdf-downloader/backend/models"
+	"emaild/backend/models"
 	"go.etcd.io/bbolt"
 )
 
