@@ -195,6 +195,38 @@ export const useAppStore = defineStore('app', () => {
     await api.system.quitApp()
   }
 
+  // 设置管理的便捷方法
+  const saveSettings = async (settings: any) => {
+    // 将前端设置字段映射到后端配置字段
+    const configToSave: Partial<AppConfig> = {
+      download_path: settings.downloadPath,
+      max_concurrent: settings.maxConcurrency,
+      check_interval: settings.checkInterval,
+      auto_check: settings.autoStart || false,
+      minimize_to_tray: settings.minimizeToTray,
+      start_minimized: settings.startMinimized || false,
+      enable_notification: settings.enableNotification
+    }
+    
+    await updateConfig(configToSave)
+  }
+
+  const loadSettings = async () => {
+    const config = await loadConfig()
+    if (!config) return null
+    
+    // 将后端配置字段映射到前端设置字段
+    return {
+      downloadPath: config.download_path,
+      maxConcurrency: config.max_concurrent,
+      checkInterval: config.check_interval,
+      autoStart: config.auto_check,
+      minimizeToTray: config.minimize_to_tray,
+      startMinimized: config.start_minimized,
+      enableNotification: config.enable_notification
+    }
+  }
+
   // 初始化应用数据
   const initialize = async () => {
     try {
@@ -253,6 +285,8 @@ export const useAppStore = defineStore('app', () => {
     minimizeToTray,
     restoreFromTray,
     quitApp,
+    saveSettings,
+    loadSettings,
     initialize
   }
 })

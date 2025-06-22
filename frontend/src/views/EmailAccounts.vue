@@ -22,7 +22,7 @@
         v-for="account in emailAccounts"
         :key="account.id"
         class="email-card"
-        :class="{ active: account.isActive }"
+        :class="{ active: account.is_active }"
       >
         <div class="email-card-header">
           <div class="email-info">
@@ -31,13 +31,13 @@
             </div>
             <div class="email-details">
               <div class="email-address">{{ account.email }}</div>
-              <div class="email-provider">{{ account.imapServer }}:{{ account.imapPort }}</div>
+              <div class="email-provider">{{ account.imap_server }}:{{ account.imap_port }}</div>
             </div>
           </div>
           
           <div class="email-actions">
-            <n-tag :type="account.isActive ? 'success' : 'default'" size="small">
-              {{ account.isActive ? '已启用' : '已禁用' }}
+            <n-tag :type="account.is_active ? 'success' : 'default'" size="small">
+              {{ account.is_active ? '已启用' : '已禁用' }}
             </n-tag>
             
             <n-dropdown
@@ -82,15 +82,15 @@
                 <h4>连接配置</h4>
                 <div class="detail-item">
                   <span class="label">IMAP服务器:</span>
-                  <span class="value">{{ account.imapServer }}:{{ account.imapPort }}</span>
+                  <span class="value">{{ account.imap_server }}:{{ account.imap_port }}</span>
                 </div>
                 <div class="detail-item">
                   <span class="label">使用SSL:</span>
-                  <span class="value">{{ account.useSSL ? '是' : '否' }}</span>
+                  <span class="value">{{ account.use_ssl ? '是' : '否' }}</span>
                 </div>
                 <div class="detail-item">
                   <span class="label">检查间隔:</span>
-                  <span class="value">{{ account.checkInterval }}分钟</span>
+                  <span class="value">{{ account.check_interval }}分钟</span>
                 </div>
               </div>
               
@@ -98,15 +98,15 @@
                 <h4>下载设置</h4>
                 <div class="detail-item">
                   <span class="label">下载目录:</span>
-                  <span class="value">{{ account.downloadPath || '默认目录' }}</span>
+                  <span class="value">{{ account.download_path || '默认目录' }}</span>
                 </div>
                 <div class="detail-item">
                   <span class="label">文件过滤:</span>
-                  <span class="value">{{ account.fileFilter || '*.pdf' }}</span>
+                  <span class="value">{{ account.file_filter || '*.pdf' }}</span>
                 </div>
                 <div class="detail-item">
                   <span class="label">最大文件大小:</span>
-                  <span class="value">{{ formatFileSize(account.maxFileSize) }}</span>
+                  <span class="value">{{ formatFileSize(account.max_file_size) }}</span>
                 </div>
               </div>
             </div>
@@ -161,20 +161,20 @@
           <n-input v-model:value="currentAccount.password" type="password" placeholder="请输入邮箱密码或授权码" />
         </n-form-item>
         
-        <n-form-item label="IMAP服务器" path="imapServer">
-          <n-input v-model:value="currentAccount.imapServer" placeholder="如: imap.qq.com" />
+        <n-form-item label="IMAP服务器" path="imap_server">
+          <n-input v-model:value="currentAccount.imap_server" placeholder="如: imap.qq.com" />
         </n-form-item>
         
-        <n-form-item label="IMAP端口" path="imapPort">
-          <n-input-number v-model:value="currentAccount.imapPort" :min="1" :max="65535" />
+        <n-form-item label="IMAP端口" path="imap_port">
+          <n-input-number v-model:value="currentAccount.imap_port" :min="1" :max="65535" />
         </n-form-item>
         
         <n-form-item label="使用SSL">
-          <n-switch v-model:value="currentAccount.useSSL" />
+          <n-switch v-model:value="currentAccount.use_ssl" />
         </n-form-item>
         
         <n-form-item label="启用账户">
-          <n-switch v-model:value="currentAccount.isActive" />
+          <n-switch v-model:value="currentAccount.is_active" />
         </n-form-item>
       </n-form>
       
@@ -297,7 +297,7 @@ onMounted(() => {
 const getAccountActions = (account: any) => {
   const actions = []
   
-  if (account.isActive) {
+  if (account.is_active) {
     actions.push({ label: '禁用账户', key: 'disable' })
   } else {
     actions.push({ label: '启用账户', key: 'enable' })
@@ -340,7 +340,7 @@ const toggleAccount = async (account: any) => {
   await withErrorHandling(async () => {
     const updatedAccount = { ...account, is_active: !account.is_active }
     await appStore.updateEmailAccount(updatedAccount)
-    message.success(account.is_active ? '账户已启用' : '账户已禁用')
+    message.success(updatedAccount.is_active ? '账户已启用' : '账户已禁用')
   }, '切换账户状态')
 }
 
@@ -378,10 +378,10 @@ const editAccount = (account: any) => {
   Object.assign(currentAccount.value, {
     email: account.email,
     password: '', // 出于安全考虑，不显示密码
-    imap_server: account.imapServer,
-    imap_port: account.imapPort,
-    use_ssl: account.useSSL,
-    is_active: account.isActive,
+    imap_server: account.imap_server,
+    imap_port: account.imap_port,
+    use_ssl: account.use_ssl,
+    is_active: account.is_active,
     connectionStatus: account.connectionStatus,
     lastCheck: account.lastCheck,
     processedCount: account.processedCount

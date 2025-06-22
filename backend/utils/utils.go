@@ -19,10 +19,15 @@ import (
 	"golang.org/x/text/encoding/unicode"
 )
 
+// generatePDFFileName 生成唯一的PDF文件名
+func generatePDFFileName() string {
+	return fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
+}
+
 // CleanFilename 清理文件名，移除非法字符并确保有PDF扩展名
 func CleanFilename(filename string) string {
 	if filename == "" {
-		filename = fmt.Sprintf("pdf_%d", time.Now().Unix())
+		filename = generatePDFFileName()
 	}
 
 	// 解码可能的编码字符
@@ -239,13 +244,13 @@ func ValidatePDFFile(filePath string) error {
 // ExtractFilenameFromURL 从URL中提取文件名
 func ExtractFilenameFromURL(rawURL string) string {
 	if rawURL == "" {
-		return fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
+		return generatePDFFileName()
 	}
 
 	// 解析URL
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
+		return generatePDFFileName()
 	}
 
 	// 从路径中提取文件名
@@ -257,7 +262,7 @@ func ExtractFilenameFromURL(rawURL string) string {
 		if queryFilename := parsedURL.Query().Get("filename"); queryFilename != "" {
 			filename = queryFilename
 		} else {
-			filename = fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
+			filename = generatePDFFileName()
 		}
 	}
 

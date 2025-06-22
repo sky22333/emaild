@@ -224,6 +224,10 @@ func (a *App) TestEmailConnection(account models.EmailAccount) error {
 
 // CheckAllEmails 检查所有邮箱
 func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
+	if a.emailService == nil {
+		return nil, fmt.Errorf("邮件服务未初始化")
+	}
+
 	accounts, err := a.db.GetEmailAccounts()
 	if err != nil {
 		return nil, fmt.Errorf("获取邮箱账户失败: %v", err)
@@ -236,16 +240,16 @@ func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
 			continue
 		}
 		
+		// 调用实际的邮件检查逻辑
+		serviceResult := a.emailService.CheckAccountWithResult(&account)
+		// 转换为App包的EmailCheckResult
 		result := EmailCheckResult{
-			Account: &account,
-			Success: true,
+			Account:   serviceResult.Account,
+			NewEmails: serviceResult.NewEmails,
+			PDFsFound: serviceResult.PDFsFound,
+			Error:     serviceResult.Error,
+			Success:   serviceResult.Success,
 		}
-		
-		// 这里可以调用实际的邮件检查逻辑
-		// 暂时返回模拟结果
-		result.NewEmails = 0
-		result.PDFsFound = 0
-		
 		results = append(results, result)
 	}
 	
@@ -256,19 +260,30 @@ func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
 func (a *App) CheckSingleEmail(accountID uint) (EmailCheckResult, error) {
 	account, err := a.db.GetEmailAccountByID(accountID)
 	if err != nil {
-		return EmailCheckResult{}, fmt.Errorf("获取邮箱账户失败: %v", err)
+		return EmailCheckResult{
+			Error:   fmt.Sprintf("获取邮箱账户失败: %v", err),
+			Success: false,
+		}, err
 	}
 
-	result := EmailCheckResult{
-		Account: account,
-		Success: true,
+	if a.emailService == nil {
+		return EmailCheckResult{
+			Account: account,
+			Error:   "邮件服务未初始化",
+			Success: false,
+		}, fmt.Errorf("邮件服务未初始化")
 	}
-	
-	// 这里可以调用实际的邮件检查逻辑
-	// 暂时返回模拟结果
-	result.NewEmails = 0
-	result.PDFsFound = 0
-	
+
+	// 调用实际的邮件检查逻辑
+	serviceResult := a.emailService.CheckAccountWithResult(account)
+	// 转换为App包的EmailCheckResult
+	result := EmailCheckResult{
+		Account:   serviceResult.Account,
+		NewEmails: serviceResult.NewEmails,
+		PDFsFound: serviceResult.PDFsFound,
+		Error:     serviceResult.Error,
+		Success:   serviceResult.Success,
+	}
 	return result, nil
 }
 

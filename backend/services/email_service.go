@@ -21,6 +21,15 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// EmailCheckResult 邮件检查结果 - 应该和backend包中的定义保持一致
+type EmailCheckResult struct {
+	Account   *models.EmailAccount `json:"account"`
+	NewEmails int                  `json:"new_emails"`
+	PDFsFound int                  `json:"pdfs_found"`
+	Error     string               `json:"error,omitempty"`
+	Success   bool                 `json:"success"`
+}
+
 // EmailService 邮件服务结构体
 type EmailService struct {
 	db               *database.Database
@@ -47,14 +56,7 @@ type IMAPConnection struct {
 	cancel      context.CancelFunc
 }
 
-// EmailCheckResult 邮件检查结果
-type EmailCheckResult struct {
-	Account     *models.EmailAccount `json:"account"`
-	NewEmails   int                  `json:"new_emails"`
-	PDFsFound   int                  `json:"pdfs_found"`
-	Error       string               `json:"error,omitempty"`
-	Success     bool                 `json:"success"`
-}
+// 使用backend包中的EmailCheckResult定义
 
 // NewEmailService 创建新的邮件服务实例
 func NewEmailService(db *database.Database, downloadService *DownloadService, logger *logrus.Logger) *EmailService {
@@ -199,28 +201,64 @@ func (es *EmailService) getActiveAccounts() ([]models.EmailAccount, error) {
 	return accounts, nil
 }
 
-// checkAccount 检查指定邮箱账户
-func (es *EmailService) checkAccount(account *models.EmailAccount) {
+// CheckAccountWithResult 检查指定账户并返回详细结果
+func (es *EmailService) CheckAccountWithResult(account *models.EmailAccount) EmailCheckResult {
+	result := EmailCheckResult{
+		Account:   account,
+		NewEmails: 0,
+		PDFsFound: 0,
+		Success:   false,
+	}
+
 	conn, err := es.getConnection(account.ID)
 	if err != nil {
-		return
+		result.Error = fmt.Sprintf("获取连接失败: %v", err)
+		es.logger.Errorf("账户%d连接失败: %v", account.ID, err)
+		return result
 	}
 	defer es.releaseConnection(account.ID)
-	
+
 	// 选择收件箱
 	if err := conn.selectInbox(); err != nil {
-		return
+		result.Error = fmt.Sprintf("选择收件箱失败: %v", err)
+		es.logger.Errorf("账户%d选择收件箱失败: %v", account.ID, err)
+		return result
 	}
-	
+
 	// 搜索未读邮件
 	messages, err := conn.searchUnreadMessages()
 	if err != nil {
-		return
+		result.Error = fmt.Sprintf("搜索邮件失败: %v", err)
+		es.logger.Errorf("账户%d搜索邮件失败: %v", account.ID, err)
+		return result
 	}
-	
-	// 处理每封邮件
+
+	result.NewEmails = len(messages)
+	es.logger.Infof("账户%d发现%d封未读邮件", account.ID, len(messages))
+
+	// 处理每封邮件并统计PDF数量
+	pdfCount := 0
 	for _, msg := range messages {
-		es.processMessage(account, msg)
+		pdfSources := es.analyzePDFSources(account, msg)
+		if len(pdfSources) > 0 {
+			pdfCount += len(pdfSources)
+			// 处理邮件（保存记录和创建下载任务）
+			es.processMessage(account, msg)
+		}
+	}
+
+	result.PDFsFound = pdfCount
+	result.Success = true
+	es.logger.Infof("账户%d检查完成: %d封邮件, %d个PDF", account.ID, result.NewEmails, result.PDFsFound)
+	
+	return result
+}
+
+func (es *EmailService) checkAccount(account *models.EmailAccount) {
+	// 使用新的CheckAccountWithResult方法
+	result := es.CheckAccountWithResult(account)
+	if !result.Success {
+		es.logger.Errorf("账户%d检查失败: %s", account.ID, result.Error)
 	}
 }
 
@@ -273,31 +311,49 @@ func (es *EmailService) getAccountByID(accountID uint) (*models.EmailAccount, er
 
 // createConnection 创建IMAP连接
 func (es *EmailService) createConnection(account *models.EmailAccount) (*IMAPConnection, error) {
+	return es.createConnectionWithTimeout(es.ctx, account)
+}
+
+// createConnectionWithTimeout 创建带超时的IMAP连接
+func (es *EmailService) createConnectionWithTimeout(ctx context.Context, account *models.EmailAccount) (*IMAPConnection, error) {
 	// 连接到IMAP服务器
 	var c *client.Client
 	var err error
 	
+	serverAddr := fmt.Sprintf("%s:%d", account.IMAPServer, account.IMAPPort)
+	es.logger.Infof("正在连接到 %s (SSL: %v)", serverAddr, account.UseSSL)
+	
 	if account.UseSSL {
-		// SSL连接
-		c, err = client.DialTLS(fmt.Sprintf("%s:%d", account.IMAPServer, account.IMAPPort), &tls.Config{
+		// SSL连接 - 添加更灵活的TLS配置
+		tlsConfig := &tls.Config{
+			ServerName:         account.IMAPServer,
 			InsecureSkipVerify: false,
-		})
+		}
+		
+		c, err = client.DialTLS(serverAddr, tlsConfig)
+		if err != nil {
+			// 如果严格验证失败，尝试宽松模式
+			es.logger.Warnf("严格SSL验证失败，尝试跳过证书验证: %v", err)
+			tlsConfig.InsecureSkipVerify = true
+			c, err = client.DialTLS(serverAddr, tlsConfig)
+		}
 	} else {
 		// 普通连接
-		c, err = client.Dial(fmt.Sprintf("%s:%d", account.IMAPServer, account.IMAPPort))
+		c, err = client.Dial(serverAddr)
 	}
 	
 	if err != nil {
-		return nil, fmt.Errorf("连接IMAP服务器失败: %v", err)
+		return nil, fmt.Errorf("连接IMAP服务器失败 %s: %v", serverAddr, err)
 	}
 	
 	// 登录
+	es.logger.Infof("正在登录账户 %s", account.Email)
 	if err := c.Login(account.Email, account.Password); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("IMAP登录失败: %v", err)
+		return nil, fmt.Errorf("IMAP登录失败 %s: %v", account.Email, err)
 	}
 	
-	ctx, cancel := context.WithCancel(es.ctx)
+	connCtx, cancel := context.WithCancel(ctx)
 	
 	conn := &IMAPConnection{
 		ID:          account.ID,
@@ -305,10 +361,11 @@ func (es *EmailService) createConnection(account *models.EmailAccount) (*IMAPCon
 		Client:      c,
 		LastUsed:    time.Now(),
 		IsConnected: true,
-		ctx:         ctx,
+		ctx:         connCtx,
 		cancel:      cancel,
 	}
 	
+	es.logger.Infof("成功创建连接 %s", account.Email)
 	return conn, nil
 }
 
@@ -333,40 +390,86 @@ func (conn *IMAPConnection) searchUnreadMessages() ([]*imap.Message, error) {
 		return nil, fmt.Errorf("连接已断开")
 	}
 	
-	// 搜索未读邮件
+	// 多种搜索策略，兼容不同邮件服务器
+	var uids []uint32
+	var err error
+	
+	// 策略1: 搜索未读邮件（标准方式）
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{"\\Seen"}
 	
-	uids, err := conn.Client.Search(criteria)
+	uids, err = conn.Client.Search(criteria)
 	if err != nil {
-		return nil, err
+		// 策略2: 如果标准方式失败，尝试使用UNSEEN标志
+		criteria = imap.NewSearchCriteria()
+		criteria.WithFlags = []string{"\\Recent"}
+		uids, err = conn.Client.Search(criteria)
+		
+		if err != nil {
+			// 策略3: 搜索最近的邮件（最后的备选方案）
+			criteria = imap.NewSearchCriteria()
+			since := time.Now().AddDate(0, 0, -7) // 最近7天
+			criteria.Since = since
+			uids, err = conn.Client.Search(criteria)
+			
+			if err != nil {
+				return nil, fmt.Errorf("所有搜索策略均失败: %v", err)
+			}
+		}
 	}
 	
 	if len(uids) == 0 {
 		return nil, nil
 	}
 	
+	// 限制批量获取的邮件数量，避免超时
+	maxMessages := 50
+	if len(uids) > maxMessages {
+		uids = uids[:maxMessages]
+	}
+	
 	// 获取邮件详情
 	seqset := new(imap.SeqSet)
 	seqset.AddNum(uids...)
 	
-	messages := make(chan *imap.Message, 10)
+	messages := make(chan *imap.Message, len(uids))
 	done := make(chan error, 1)
 	
 	go func() {
-		done <- conn.Client.Fetch(seqset, []imap.FetchItem{imap.FetchEnvelope, imap.FetchBodyStructure}, messages)
+		done <- conn.Client.Fetch(seqset, []imap.FetchItem{
+			imap.FetchEnvelope, 
+			imap.FetchBodyStructure,
+			imap.FetchFlags,
+		}, messages)
 	}()
 	
 	var msgs []*imap.Message
 	for msg := range messages {
-		msgs = append(msgs, msg)
+		// 验证邮件确实是未读的
+		if conn.isMessageUnread(msg) {
+			msgs = append(msgs, msg)
+		}
 	}
 	
 	if err := <-done; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取邮件详情失败: %v", err)
 	}
 	
 	return msgs, nil
+}
+
+// isMessageUnread 检查邮件是否为未读状态
+func (conn *IMAPConnection) isMessageUnread(msg *imap.Message) bool {
+	if msg.Flags == nil {
+		return true // 如果没有标志信息，假定为未读
+	}
+	
+	for _, flag := range msg.Flags {
+		if flag == "\\Seen" {
+			return false // 已读
+		}
+	}
+	return true // 未读
 }
 
 func (conn *IMAPConnection) isAlive() bool {
@@ -374,9 +477,24 @@ func (conn *IMAPConnection) isAlive() bool {
 		return false
 	}
 	
-	// 发送NOOP命令检测连接是否存活
-	err := conn.Client.Noop()
-	return err == nil
+	// 使用超时检测连接状态
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Client.Noop()
+	}()
+	
+	select {
+	case err := <-done:
+		if err != nil {
+			conn.IsConnected = false
+			return false
+		}
+		return true
+	case <-time.After(10 * time.Second):
+		// 超时认为连接失效
+		conn.IsConnected = false
+		return false
+	}
 }
 
 func (conn *IMAPConnection) close() {
@@ -521,9 +639,6 @@ func (es *EmailService) analyzePDFSources(account *models.EmailAccount, msg *ima
 		pdfLinks := es.extractPDFLinks(msg.Envelope.Subject)
 		for _, link := range pdfLinks {
 			fileName := utils.ExtractFilenameFromURL(link)
-			if fileName == "" {
-				fileName = fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
-			}
 			fileName = utils.CleanFilename(fileName)
 			localPath := filepath.Join(config.DownloadPath, fileName)
 			
@@ -708,15 +823,34 @@ func (es *EmailService) GetEmailMessages(limit, offset int) ([]models.EmailMessa
 
 // TestConnection 测试邮箱连接
 func (es *EmailService) TestConnection(account *models.EmailAccount) error {
-	conn, err := es.createConnection(account)
+	es.logger.Infof("开始测试账户%s的连接", account.Email)
+	
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	conn, err := es.createConnectionWithTimeout(ctx, account)
 	if err != nil {
-		return err
+		es.logger.Errorf("创建连接失败 %s: %v", account.Email, err)
+		return fmt.Errorf("连接失败: %v", err)
 	}
 	defer conn.close()
 	
 	// 尝试选择收件箱来验证连接
-	err = conn.selectInbox()
-	return err
+	if err := conn.selectInbox(); err != nil {
+		es.logger.Errorf("选择收件箱失败 %s: %v", account.Email, err)
+		return fmt.Errorf("无法访问收件箱: %v", err)
+	}
+	
+	// 尝试获取邮箱状态确认连接正常
+	if status, err := conn.Client.Status("INBOX", []imap.StatusItem{imap.StatusMessages}); err != nil {
+		es.logger.Errorf("获取邮箱状态失败 %s: %v", account.Email, err)
+		return fmt.Errorf("无法获取邮箱状态: %v", err)
+	} else {
+		es.logger.Infof("连接测试成功 %s: 邮箱中有%d封邮件", account.Email, status.Messages)
+	}
+	
+	return nil
 }
 
 // Start 启动邮件服务

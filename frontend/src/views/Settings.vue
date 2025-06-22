@@ -15,12 +15,16 @@
               <n-input-number v-model:value="settings.maxConcurrency" :min="1" :max="10" />
             </n-form-item>
             
-            <n-form-item label="自动启动">
+            <n-form-item label="自动检查">
               <n-switch v-model:value="settings.autoStart" />
             </n-form-item>
             
             <n-form-item label="最小化到托盘">
               <n-switch v-model:value="settings.minimizeToTray" />
+            </n-form-item>
+            
+            <n-form-item label="启动时最小化">
+              <n-switch v-model:value="settings.startMinimized" />
             </n-form-item>
           </n-form>
         </n-tab-pane>
@@ -31,15 +35,6 @@
               <n-input-number v-model:value="settings.checkInterval" :min="1" :max="60" />
               <template #feedback>分钟</template>
             </n-form-item>
-            
-                         <n-form-item label="下载超时">
-               <n-input-number v-model:value="settings.downloadTimeout" :min="10" :max="300" />
-               <template #feedback>秒</template>
-             </n-form-item>
-            
-            <n-form-item label="重试次数">
-              <n-input-number v-model:value="settings.maxRetries" :min="0" :max="10" />
-            </n-form-item>
           </n-form>
         </n-tab-pane>
         
@@ -47,18 +42,6 @@
           <n-form :model="settings" label-placement="left" label-width="120px">
             <n-form-item label="桌面通知">
               <n-switch v-model:value="settings.enableNotification" />
-            </n-form-item>
-            
-            <n-form-item label="声音提醒">
-              <n-switch v-model:value="settings.enableSound" />
-            </n-form-item>
-            
-            <n-form-item label="下载完成通知">
-              <n-switch v-model:value="settings.notifyOnComplete" />
-            </n-form-item>
-            
-            <n-form-item label="错误通知">
-              <n-switch v-model:value="settings.notifyOnError" />
             </n-form-item>
           </n-form>
         </n-tab-pane>
@@ -68,7 +51,7 @@
       
       <n-space justify="end">
         <n-button @click="resetSettings">重置设置</n-button>
-        <n-button type="primary" @click="saveSettings">保存设置</n-button>
+        <n-button type="primary" @click="saveSettings" :loading="saving">保存设置</n-button>
       </n-space>
     </n-card>
   </div>
@@ -76,7 +59,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { useAppStore } from '@/stores/app'
+import { useAppStore } from '../stores/app'
 import {
   NCard,
   NTabs,
@@ -95,25 +78,24 @@ import {
 
 const appStore = useAppStore()
 const message = useMessage()
+const saving = ref(false)
 
 const settings = ref({
   downloadPath: '',
   maxConcurrency: 3,
   autoStart: false,
   minimizeToTray: true,
+  startMinimized: false,
   checkInterval: 5,
-  downloadTimeout: 60,
-  maxRetries: 3,
-  enableNotification: true,
-  enableSound: false,
-  notifyOnComplete: true,
-  notifyOnError: true
+  enableNotification: true
 })
 
 const selectDownloadPath = async () => {
   try {
-    // 调用后端选择目录
-    // 选择下载目录功能
+    const selectedPath = await appStore.selectDownloadFolder()
+    if (selectedPath) {
+      settings.value.downloadPath = selectedPath
+    }
   } catch (error) {
     message.error('选择目录失败')
   }
@@ -121,26 +103,36 @@ const selectDownloadPath = async () => {
 
 const saveSettings = async () => {
   try {
+    saving.value = true
     await appStore.saveSettings(settings.value)
     message.success('设置已保存')
   } catch (error) {
+    console.error('保存设置失败:', error)
     message.error('保存设置失败')
+  } finally {
+    saving.value = false
   }
 }
 
-const resetSettings = () => {
-  settings.value = {
-    downloadPath: '',
-    maxConcurrency: 3,
-    autoStart: false,
-    minimizeToTray: true,
-    checkInterval: 5,
-    downloadTimeout: 60,
-    maxRetries: 3,
-    enableNotification: true,
-    enableSound: false,
-    notifyOnComplete: true,
-    notifyOnError: true
+const resetSettings = async () => {
+  try {
+    const defaultSettings = await appStore.loadSettings()
+    if (defaultSettings) {
+      settings.value = { ...defaultSettings }
+    } else {
+      settings.value = {
+        downloadPath: '',
+        maxConcurrency: 3,
+        autoStart: false,
+        minimizeToTray: true,
+        startMinimized: false,
+        checkInterval: 5,
+        enableNotification: true
+      }
+    }
+    message.info('设置已重置')
+  } catch (error) {
+    message.error('重置设置失败')
   }
 }
 
@@ -152,6 +144,7 @@ onMounted(async () => {
     }
   } catch (error) {
     console.error('加载设置失败:', error)
+    message.warning('加载设置失败，使用默认设置')
   }
 })
 </script>

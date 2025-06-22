@@ -17,6 +17,26 @@ type Database struct {
 	DB *sql.DB
 }
 
+// withTransaction 执行事务的通用方法
+func (d *Database) withTransaction(fn func(*sql.Tx) error) error {
+	tx, err := d.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	err = fn(tx)
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
 // NewDatabase 创建新的数据库连接
 func NewDatabase() (*Database, error) {
 	// 获取用户目录
@@ -204,40 +224,33 @@ func (d *Database) initDefaultConfig() error {
 
 // CreateEmailAccount 创建邮箱账户
 func (d *Database) CreateEmailAccount(account *models.EmailAccount) error {
-	tx, err := d.DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
 	now := time.Now()
-	query := `
-		INSERT INTO email_accounts (name, email, password, imap_server, imap_port, use_ssl, is_active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
 	
-	result, err := tx.Exec(query,
-		account.Name, account.Email, account.Password, account.IMAPServer,
-		account.IMAPPort, account.UseSSL, account.IsActive, now, now,
-	)
-	if err != nil {
-		return err
-	}
+	return d.withTransaction(func(tx *sql.Tx) error {
+		query := `
+			INSERT INTO email_accounts (name, email, password, imap_server, imap_port, use_ssl, is_active, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
+		
+		result, err := tx.Exec(query,
+			account.Name, account.Email, account.Password, account.IMAPServer,
+			account.IMAPPort, account.UseSSL, account.IsActive, now, now,
+		)
+		if err != nil {
+			return err
+		}
 
-	id, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return err
+		}
 
-	account.ID = uint(id)
-	account.CreatedAt = models.TimeToString(now)
-	account.UpdatedAt = models.TimeToString(now)
-
-	return tx.Commit()
+		account.ID = uint(id)
+		account.CreatedAt = models.TimeToString(now)
+		account.UpdatedAt = models.TimeToString(now)
+		
+		return nil
+	})
 }
 
 // GetEmailAccounts 获取所有邮箱账户
@@ -297,34 +310,27 @@ func (d *Database) GetEmailAccountByID(id uint) (*models.EmailAccount, error) {
 
 // UpdateEmailAccount 更新邮箱账户
 func (d *Database) UpdateEmailAccount(account *models.EmailAccount) error {
-	tx, err := d.DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
 	now := time.Now()
-	query := `
-		UPDATE email_accounts 
-		SET name = ?, email = ?, password = ?, imap_server = ?, imap_port = ?, 
-			use_ssl = ?, is_active = ?, updated_at = ?
-		WHERE id = ?
-	`
 	
-	_, err = tx.Exec(query,
-		account.Name, account.Email, account.Password, account.IMAPServer,
-		account.IMAPPort, account.UseSSL, account.IsActive, now, account.ID,
-	)
-	if err != nil {
-		return err
-	}
+	return d.withTransaction(func(tx *sql.Tx) error {
+		query := `
+			UPDATE email_accounts 
+			SET name = ?, email = ?, password = ?, imap_server = ?, imap_port = ?, 
+				use_ssl = ?, is_active = ?, updated_at = ?
+			WHERE id = ?
+		`
+		
+		_, err := tx.Exec(query,
+			account.Name, account.Email, account.Password, account.IMAPServer,
+			account.IMAPPort, account.UseSSL, account.IsActive, now, account.ID,
+		)
+		if err != nil {
+			return err
+		}
 
-	account.UpdatedAt = models.TimeToString(now)
-	return tx.Commit()
+		account.UpdatedAt = models.TimeToString(now)
+		return nil
+	})
 }
 
 // DeleteEmailAccount 删除邮箱账户
