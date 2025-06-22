@@ -1,15 +1,44 @@
 import { ref, computed } from 'vue'
 import { useErrorHandler } from './useErrorHandler'
-import * as WailsApp from '../../wailsjs/go/backend/App'
-import { models, backend, services } from '../../wailsjs/go/models'
+import * as WailsApp from '../wailsjs/go/backend/App'
+import { models, backend } from '../wailsjs/go/models'
 
-// 使用生成的类型
+// 使用Wails生成的类型
 type EmailAccount = models.EmailAccount
 type DownloadTask = models.DownloadTask
 type AppConfig = models.AppConfig
 type DownloadStatistics = models.DownloadStatistics
-type EmailCheckResult = services.EmailCheckResult
+type EmailCheckResult = backend.EmailCheckResult
 type GetDownloadTasksResponse = backend.GetDownloadTasksResponse
+
+// 检查Wails运行时是否可用
+const isWailsReady = (): boolean => {
+  return !!(window as any)?.go?.backend?.App
+}
+
+// 等待Wails运行时准备就绪
+const waitForWails = (): Promise<void> => {
+  return new Promise((resolve) => {
+    if (isWailsReady()) {
+      resolve()
+      return
+    }
+    
+    const checkInterval = setInterval(() => {
+      if (isWailsReady()) {
+        clearInterval(checkInterval)
+        resolve()
+      }
+    }, 100)
+    
+    // 超时处理
+    setTimeout(() => {
+      clearInterval(checkInterval)
+      console.warn('Wails运行时初始化超时')
+      resolve()
+    }, 5000)
+  })
+}
 
 export function useApi() {
   const { withErrorHandling, isLoading, error } = useErrorHandler()
@@ -19,6 +48,13 @@ export function useApi() {
     apiCall: () => Promise<T>,
     context: string
   ): Promise<T> => {
+    // 等待Wails运行时准备就绪
+    await waitForWails()
+    
+    if (!isWailsReady()) {
+      throw new Error('Wails运行时未准备就绪')
+    }
+    
     const result = await withErrorHandling(apiCall, context)
     return result as T
   }
@@ -117,7 +153,7 @@ export function useApi() {
 
     async getTasksByStatus(status: string): Promise<DownloadTask[]> {
       return safeApiCall(
-        () => WailsApp.GetDownloadTasksByStatus(status as any),
+        () => WailsApp.GetDownloadTasksByStatus(status),
         '按状态获取下载任务'
       )
     },
@@ -191,20 +227,6 @@ export function useApi() {
       )
     },
 
-    async getLogs(lines = 100): Promise<string[]> {
-      return safeApiCall(
-        () => WailsApp.GetLogs(lines),
-        '获取日志'
-      )
-    },
-
-    async getAppInfo(): Promise<Record<string, any>> {
-      return safeApiCall(
-        () => WailsApp.GetAppInfo(),
-        '获取应用信息'
-      )
-    },
-
     async getServiceStatus(): Promise<Record<string, boolean>> {
       return safeApiCall(
         () => WailsApp.GetServiceStatus(),
@@ -231,19 +253,43 @@ export function useApi() {
         () => WailsApp.QuitApp(),
         '退出应用'
       )
+    },
+
+    async getAppInfo(): Promise<Record<string, any>> {
+      return safeApiCall(
+        () => WailsApp.GetAppInfo(),
+        '获取应用信息'
+      )
+    },
+
+    async isEmailServiceRunning(): Promise<boolean> {
+      return safeApiCall(
+        () => WailsApp.IsEmailServiceRunning(),
+        '检查邮件服务状态'
+      )
+    },
+
+    async getActiveDownloadsCount(): Promise<number> {
+      return safeApiCall(
+        () => WailsApp.GetActiveDownloadsCount(),
+        '获取活跃下载数量'
+      )
     }
   }
 
   return {
-    // 状态
-    isLoading,
-    error,
+    // API 分组
+    config: configApi,
+    email: emailApi,
+    download: downloadApi,
+    stats: statsApi,
+    system: systemApi,
     
-    // API分组
-    configApi,
-    emailApi,
-    downloadApi,
-    statsApi,
-    systemApi
+    // 状态
+    isLoading: computed(() => isLoading.value),
+    error: computed(() => error.value)
   }
-} 
+}
+
+// 导出类型以供其他组件使用
+export type { EmailAccount, DownloadTask, AppConfig, DownloadStatistics, EmailCheckResult, GetDownloadTasksResponse } 

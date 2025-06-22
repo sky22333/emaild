@@ -14,6 +14,10 @@ export function CheckSingleEmail(arg1) {
   return window['go']['backend']['App']['CheckSingleEmail'](arg1);
 }
 
+export function CreateConfig(arg1) {
+  return window['go']['backend']['App']['CreateConfig'](arg1);
+}
+
 export function CreateDownloadTask(arg1) {
   return window['go']['backend']['App']['CreateDownloadTask'](arg1);
 }
@@ -28,6 +32,10 @@ export function DeleteEmailAccount(arg1) {
 
 export function GetActiveDownloads() {
   return window['go']['backend']['App']['GetActiveDownloads']();
+}
+
+export function GetActiveDownloadsCount() {
+  return window['go']['backend']['App']['GetActiveDownloadsCount']();
 }
 
 export function GetAppInfo() {
@@ -50,8 +58,8 @@ export function GetEmailAccounts() {
   return window['go']['backend']['App']['GetEmailAccounts']();
 }
 
-export function GetLogs(arg1) {
-  return window['go']['backend']['App']['GetLogs'](arg1);
+export function GetEmailMessages(arg1, arg2) {
+  return window['go']['backend']['App']['GetEmailMessages'](arg1, arg2);
 }
 
 export function GetServiceStatus() {
@@ -60,10 +68,6 @@ export function GetServiceStatus() {
 
 export function GetStatistics(arg1) {
   return window['go']['backend']['App']['GetStatistics'](arg1);
-}
-
-export function IsDownloadServiceRunning() {
-  return window['go']['backend']['App']['IsDownloadServiceRunning']();
 }
 
 export function IsEmailServiceRunning() {

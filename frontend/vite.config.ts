@@ -36,8 +36,10 @@ export default defineConfig({
     }
   },
   server: {
-    port: 3000,
-    host: '127.0.0.1'
+    port: 34116,
+    host: '127.0.0.1',
+    strictPort: true,
+    cors: true
   },
   build: {
     outDir: 'dist',

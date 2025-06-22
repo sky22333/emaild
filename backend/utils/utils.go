@@ -191,43 +191,46 @@ func ValidatePDFFile(filePath string) error {
 	}
 	defer file.Close()
 
+	// 获取文件信息
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("无法获取文件信息: %v", err)
+	}
+
+	// 检查文件大小
+	if info.Size() < 100 {
+		return fmt.Errorf("文件太小，不是有效的PDF文件")
+	}
+
 	// 读取文件头
-	header := make([]byte, 5)
+	header := make([]byte, 10)
 	_, err = file.Read(header)
 	if err != nil {
 		return fmt.Errorf("无法读取文件头: %v", err)
 	}
 
-	// 检查PDF头
+	// 验证PDF文件头
 	if !IsPDFContent(header) {
-		return fmt.Errorf("不是有效的PDF文件")
+		return fmt.Errorf("文件头不匹配，不是有效的PDF文件")
 	}
 
-	// 检查文件是否有尾部EOF标记
-	stat, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("无法获取文件信息: %v", err)
-	}
+	// 检查文件尾（PDF文件应该以%%EOF结尾）
+	if info.Size() > 1024 {
+		_, err = file.Seek(-1024, io.SeekEnd)
+		if err != nil {
+			return fmt.Errorf("无法定位到文件尾: %v", err)
+		}
 
-	if stat.Size() < 10 {
-		return fmt.Errorf("PDF文件过小，可能损坏")
-	}
+		tail := make([]byte, 1024)
+		_, err = file.Read(tail)
+		if err != nil {
+			return fmt.Errorf("无法读取文件尾: %v", err)
+		}
 
-	// 读取文件尾部，检查是否有%%EOF
-	tailSize := int64(256)
-	if stat.Size() < tailSize {
-		tailSize = stat.Size()
-	}
-
-	tail := make([]byte, tailSize)
-	_, err = file.ReadAt(tail, stat.Size()-tailSize)
-	if err != nil {
-		return fmt.Errorf("无法读取文件尾部: %v", err)
-	}
-
-	// 查找%%EOF标记
-	if !strings.Contains(string(tail), "%%EOF") {
-		return fmt.Errorf("PDF文件可能不完整，缺少EOF标记")
+		// 检查是否包含EOF标记
+		if !strings.Contains(string(tail), "%%EOF") {
+			return fmt.Errorf("文件可能不完整，缺少EOF标记")
+		}
 	}
 
 	return nil

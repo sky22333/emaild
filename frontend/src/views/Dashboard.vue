@@ -169,7 +169,7 @@ import {
   NTime,
   NEmpty
 } from 'naive-ui'
-import type { DownloadTask } from '../wails'
+import type { DownloadTask } from '../composables/useApi'
 
 const router = useRouter()
 const appStore = useAppStore()

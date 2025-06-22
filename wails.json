@@ -1,19 +1,11 @@
 {
   "$schema": "https://wails.io/schemas/config.v2.json",
-  "name": "email-pdf-downloader",
+  "name": "emaild",
   "outputfilename": "邮件附件下载器",
-  "frontend": {
-    "dir": "./frontend",
-    "install": "npm install",
-    "build": "npm run build",
-    "dev": "npm run dev",
-    "package": {
-      "manager": "npm"
-    }
-  },
-  "backend": {
-    "dir": "./backend"
-  },
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
   "author": {
     "name": "Developer",
     "email": "developer@example.com"
@@ -25,7 +17,30 @@
     "copyright": "Copyright © 2025",
     "comments": "现代化邮件附件自动下载工具"
   },
+  "windows": [
+    {
+      "icon": "assets/icon.ico"
+    }
+  ],
+  "linux": [
+    {
+      "icon": "assets/icon.png"
+    }
+  ],
+  "darwin": [
+    {
+      "icon": "assets/icon.png"
+    }
+  ],
   "nsisType": "multiple",
   "obfuscated": false,
-  "garbleargs": ""
+  "garbleargs": "",
+  "wailsjsdir": "./frontend/src",
+  "version": "2",
+  "debounceMS": 100,
+  "devServer": "localhost:34115",
+  "appargs": "",
+  "build:dir": "build",
+  "frontend:dir": "frontend",
+  "windowStartState": "normal"
 } 

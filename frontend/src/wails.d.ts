@@ -12,8 +12,8 @@ declare global {
           TestEmailConnection(account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>): Promise<void>
           
           // 邮件检查
-          CheckAllEmails(): Promise<EmailCheckResult[]>
-          CheckSingleEmail(accountID: number): Promise<EmailCheckResult>
+          CheckAllEmails(): Promise<void>
+          CheckSingleEmail(accountID: number): Promise<void>
           StartEmailMonitoring(): Promise<void>
           StopEmailMonitoring(): Promise<void>
           
@@ -45,11 +45,10 @@ declare global {
           ShowNotification(title: string, message: string): Promise<void>
           
           // 系统信息
-          GetLogs(lines: number): Promise<string[]>
           GetAppInfo(): Promise<Record<string, any>>
-          IsEmailServiceRunning(): Promise<boolean>
-          IsDownloadServiceRunning(): Promise<boolean>
           GetServiceStatus(): Promise<Record<string, boolean>>
+          IsEmailServiceRunning(): Promise<boolean>
+          GetActiveDownloadsCount(): Promise<number>
         }
       }
     }
@@ -101,13 +100,13 @@ export interface AppConfig {
   minimize_to_tray: boolean
   start_minimized: boolean
   enable_notification: boolean
-  theme: 'light' | 'dark' | 'auto'
+  theme: string
   language: string
   created_at: string
   updated_at: string
 }
 
-// 统计数据接口
+// 下载统计接口
 export interface DownloadStatistics {
   id: number
   date: string
@@ -117,15 +116,6 @@ export interface DownloadStatistics {
   total_size: number
   created_at: string
   updated_at: string
-}
-
-// 邮件检查结果接口
-export interface EmailCheckResult {
-  account: EmailAccount
-  new_emails: number
-  pdfs_found: number
-  error?: string
-  success: boolean
 }
 
 export {} 

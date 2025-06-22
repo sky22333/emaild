@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHistory, createWebHashHistory, RouteRecordRaw } from 'vue-router'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -15,7 +15,7 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'emails',
+        path: '/emails',
         name: 'emails',
         component: () => import('../views/EmailAccounts.vue'),
         meta: {
@@ -24,7 +24,7 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'downloads',
+        path: '/downloads',
         name: 'downloads',
         component: () => import('../views/Downloads.vue'),
         meta: {
@@ -33,7 +33,7 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'statistics',
+        path: '/statistics',
         name: 'statistics',
         component: () => import('../views/Statistics.vue'),
         meta: {
@@ -42,7 +42,7 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'settings',
+        path: '/settings',
         name: 'settings',
         component: () => import('../views/Settings.vue'),
         meta: {
@@ -51,7 +51,7 @@ const routes: RouteRecordRaw[] = [
         }
       },
       {
-        path: 'logs',
+        path: '/logs',
         name: 'logs',
         component: () => import('../views/Logs.vue'),
         meta: {
@@ -63,8 +63,10 @@ const routes: RouteRecordRaw[] = [
   }
 ]
 
+// 根据环境选择路由模式
+const isProduction = process.env.NODE_ENV === 'production'
 const router = createRouter({
-  history: createWebHistory(),
+  history: isProduction ? createWebHashHistory() : createWebHistory(),
   routes
 })
 

@@ -7,7 +7,7 @@ import type {
   AppConfig, 
   DownloadStatistics,
   EmailCheckResult 
-} from '../wails'
+} from '../composables/useApi'
 
 // 应用状态管理
 export const useAppStore = defineStore('app', () => {
@@ -48,11 +48,10 @@ export const useAppStore = defineStore('app', () => {
   // 获取全局加载状态
   const isLoading = computed(() => api.isLoading.value)
   const error = computed(() => api.error.value)
-  const isWailsReady = computed(() => api.isWailsReady.value)
 
   // Actions - 配置管理
   const loadConfig = async () => {
-    const result = await api.configApi.getConfig()
+    const result = await api.config.getConfig()
     config.value = result
     return result
   }
@@ -60,95 +59,95 @@ export const useAppStore = defineStore('app', () => {
   const updateConfig = async (newConfig: Partial<AppConfig>) => {
     if (config.value) {
       const updatedConfig = { ...config.value, ...newConfig }
-      await api.configApi.updateConfig(updatedConfig)
+      await api.config.updateConfig(updatedConfig)
       config.value = updatedConfig
     }
   }
 
   // Actions - 邮箱账户管理
   const loadEmailAccounts = async () => {
-    const result = await api.emailApi.getAccounts()
+    const result = await api.email.getAccounts()
     emailAccounts.value = result
     return result
   }
 
   const addEmailAccount = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    await api.emailApi.createAccount(account)
+    await api.email.createAccount(account as EmailAccount)
     await loadEmailAccounts()
   }
 
   const updateEmailAccount = async (account: EmailAccount) => {
-    await api.emailApi.updateAccount(account)
+    await api.email.updateAccount(account)
     await loadEmailAccounts()
   }
 
   const deleteEmailAccount = async (id: number) => {
-    await api.emailApi.deleteAccount(id)
+    await api.email.deleteAccount(id)
     await loadEmailAccounts()
   }
 
   const testEmailConnection = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    await api.emailApi.testConnection(account)
+    await api.email.testConnection(account as EmailAccount)
   }
 
   // Actions - 邮件检查
   const checkAllEmails = async (): Promise<EmailCheckResult[]> => {
-    const result = await api.emailApi.checkAllEmails()
+    const result = await api.email.checkAllEmails()
     return result
   }
 
   const checkSingleEmail = async (accountId: number): Promise<EmailCheckResult> => {
-    const result = await api.emailApi.checkSingleEmail(accountId)
+    const result = await api.email.checkSingleEmail(accountId)
     return result
   }
 
   const startEmailMonitoring = async () => {
-    await api.emailApi.startMonitoring()
+    await api.email.startMonitoring()
     await checkServiceStatus()
   }
 
   const stopEmailMonitoring = async () => {
-    await api.emailApi.stopMonitoring()
+    await api.email.stopMonitoring()
     await checkServiceStatus()
   }
 
   // Actions - 下载任务管理
   const loadDownloadTasks = async (page = 1, pageSize = 20) => {
-    const result = await api.downloadApi.getTasks(page, pageSize)
+    const result = await api.download.getTasks(page, pageSize)
     downloadTasks.value = result.tasks
     return result
   }
 
   const getActiveDownloads = async () => {
-    const result = await api.downloadApi.getActiveDownloads()
+    const result = await api.download.getActiveDownloads()
     return result
   }
 
   const pauseTask = async (taskId: number) => {
-    await api.downloadApi.pauseTask(taskId)
+    await api.download.pauseTask(taskId)
     await loadDownloadTasks()
   }
 
   const resumeTask = async (taskId: number) => {
-    await api.downloadApi.resumeTask(taskId)
+    await api.download.resumeTask(taskId)
     await loadDownloadTasks()
   }
 
   const cancelTask = async (taskId: number) => {
-    await api.downloadApi.cancelTask(taskId)
+    await api.download.cancelTask(taskId)
     await loadDownloadTasks()
   }
 
   // Actions - 统计数据
   const loadStatistics = async (days = 30) => {
-    const result = await api.statisticsApi.getStatistics(days)
+    const result = await api.stats.getStatistics(days)
     statistics.value = result
     return result
   }
 
   // Actions - 服务状态
   const checkServiceStatus = async () => {
-    const result = await api.systemApi.getServiceStatus()
+    const result = await api.system.getServiceStatus()
     serviceStatus.value = {
       email: result.email || false,
       download: result.download || false
@@ -158,52 +157,51 @@ export const useAppStore = defineStore('app', () => {
 
   // Actions - 系统操作
   const openDownloadFolder = async () => {
-    await api.systemApi.openDownloadFolder()
+    await api.system.openDownloadFolder()
   }
 
   const openFile = async (filePath: string) => {
-    await api.systemApi.openFile(filePath)
+    await api.system.openFile(filePath)
   }
 
   const selectDownloadFolder = async (): Promise<string> => {
-    const result = await api.systemApi.selectDownloadFolder()
+    const result = await api.system.selectDownloadFolder()
     return result
   }
 
   const showNotification = async (title: string, message: string) => {
-    await api.systemApi.showNotification(title, message)
-  }
-
-  const getLogs = async (lines = 100): Promise<string[]> => {
-    const result = await api.systemApi.getLogs(lines)
-    return result
+    await api.system.showNotification(title, message)
   }
 
   const getAppInfo = async () => {
-    const result = await api.systemApi.getAppInfo()
+    const result = await api.system.getAppInfo()
     return result
   }
 
   const minimizeToTray = async () => {
-    await api.systemApi.minimizeToTray()
+    await api.system.minimizeToTray()
   }
 
   const restoreFromTray = async () => {
-    await api.systemApi.restoreFromTray()
+    await api.system.restoreFromTray()
   }
 
   const quitApp = async () => {
-    await api.systemApi.quitApp()
+    await api.system.quitApp()
   }
 
   // 初始化应用数据
   const initialize = async () => {
-    await Promise.all([
-      loadConfig(),
-      loadEmailAccounts(),
-      loadDownloadTasks(),
-      checkServiceStatus()
-    ])
+    try {
+      await Promise.all([
+        loadConfig(),
+        loadEmailAccounts(),
+        loadDownloadTasks(),
+        checkServiceStatus()
+      ])
+    } catch (error) {
+      console.error('初始化应用数据失败:', error)
+    }
   }
 
   return {
@@ -222,53 +220,37 @@ export const useAppStore = defineStore('app', () => {
     totalDownloaded,
     isLoading,
     error,
-    isWailsReady,
     
-    // 配置管理
+    // Actions
     loadConfig,
     updateConfig,
-    
-    // 邮箱账户管理
     loadEmailAccounts,
     addEmailAccount,
     updateEmailAccount,
     deleteEmailAccount,
     testEmailConnection,
-    
-    // 邮件检查
     checkAllEmails,
     checkSingleEmail,
     startEmailMonitoring,
     stopEmailMonitoring,
-    
-    // 下载任务管理
     loadDownloadTasks,
     getActiveDownloads,
     pauseTask,
     resumeTask,
     cancelTask,
-    
-    // 统计数据
     loadStatistics,
-    
-    // 服务状态
     checkServiceStatus,
-    
-    // 系统操作
     openDownloadFolder,
     openFile,
     selectDownloadFolder,
     showNotification,
-    getLogs,
     getAppInfo,
     minimizeToTray,
     restoreFromTray,
     quitApp,
-    
-    // 初始化
     initialize
   }
 })
 
-// 导出类型以供其他地方使用
+// 导出类型
 export type { EmailAccount, DownloadTask, AppConfig, DownloadStatistics, EmailCheckResult } 

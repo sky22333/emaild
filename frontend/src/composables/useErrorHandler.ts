@@ -1,5 +1,4 @@
 import { ref } from 'vue'
-import { useMessage, useNotification } from 'naive-ui'
 
 export interface ErrorHandlerOptions {
   showMessage?: boolean
@@ -9,8 +8,6 @@ export interface ErrorHandlerOptions {
 }
 
 export function useErrorHandler() {
-  const message = useMessage()
-  const notification = useNotification()
   const isLoading = ref(false)
   const error = ref<Error | null>(null)
 
@@ -20,8 +17,6 @@ export function useErrorHandler() {
     options: ErrorHandlerOptions = {}
   ) => {
     const {
-      showMessage = true,
-      showNotification = false,
       logToConsole = true,
       customHandler
     } = options
@@ -31,20 +26,6 @@ export function useErrorHandler() {
 
     if (logToConsole) {
       console.error(`${context}失败:`, errorObj)
-    }
-
-    const errorMessage = errorObj.message || '未知错误'
-
-    if (showMessage) {
-      message.error(`${context}失败: ${errorMessage}`)
-    }
-
-    if (showNotification) {
-      notification.error({
-        title: `${context}失败`,
-        content: errorMessage,
-        duration: 5000
-      })
     }
 
     if (customHandler) {

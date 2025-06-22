@@ -44,11 +44,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { useAppStore } from '../../stores/app'
 import { NSpace, NButton } from 'naive-ui'
 
 const router = useRouter()
+const appStore = useAppStore()
 
 // 响应式数据
 const isDark = ref(false)
@@ -67,15 +69,23 @@ const showSettings = () => {
   router.push({ name: 'settings' })
 }
 
-  const minimizeWindow = async () => {
+const minimizeWindow = async () => {
+  try {
     // 调用Wails API最小化窗口
     await appStore.minimizeToTray()
+  } catch (error) {
+    console.error('最小化窗口失败:', error)
   }
+}
 
-  const closeWindow = async () => {
+const closeWindow = async () => {
+  try {
     // 调用Wails API关闭窗口
     await appStore.quitApp()
+  } catch (error) {
+    console.error('关闭窗口失败:', error)
   }
+}
 </script>
 
 <style scoped>
