@@ -26,23 +26,23 @@ export const useAppStore = defineStore('app', () => {
 
   // 计算属性
   const activeEmailAccounts = computed(() => 
-    emailAccounts.value.filter(account => account.is_active)
+    (emailAccounts.value || []).filter(account => account.is_active)
   )
 
   const runningTasks = computed(() => 
-    downloadTasks.value.filter(task => task.status === 'downloading')
+    (downloadTasks.value || []).filter(task => task.status === 'downloading')
   )
 
   const completedTasks = computed(() => 
-    downloadTasks.value.filter(task => task.status === 'completed')
+    (downloadTasks.value || []).filter(task => task.status === 'completed')
   )
 
   const failedTasks = computed(() => 
-    downloadTasks.value.filter(task => task.status === 'failed')
+    (downloadTasks.value || []).filter(task => task.status === 'failed')
   )
 
   const totalDownloaded = computed(() => 
-    completedTasks.value.reduce((sum, task) => sum + task.file_size, 0)
+    (completedTasks.value || []).reduce((sum, task) => sum + (task.file_size || 0), 0)
   )
 
   // 获取全局加载状态
@@ -67,8 +67,8 @@ export const useAppStore = defineStore('app', () => {
   // Actions - 邮箱账户管理
   const loadEmailAccounts = async () => {
     const result = await api.email.getAccounts()
-    emailAccounts.value = result
-    return result
+    emailAccounts.value = result || []
+    return result || []
   }
 
   const addEmailAccount = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
@@ -87,18 +87,18 @@ export const useAppStore = defineStore('app', () => {
   }
 
   const testEmailConnection = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    await api.email.testConnection(account as EmailAccount)
+    return await api.email.testConnection(account as EmailAccount)
   }
 
   // Actions - 邮件检查
   const checkAllEmails = async (): Promise<EmailCheckResult[]> => {
     const result = await api.email.checkAllEmails()
-    return result
+    return result || []
   }
 
   const checkSingleEmail = async (accountId: number): Promise<EmailCheckResult> => {
     const result = await api.email.checkSingleEmail(accountId)
-    return result
+    return result || { account: null, new_emails: 0, pdfs_found: 0, error: '', success: false }
   }
 
   const startEmailMonitoring = async () => {
@@ -114,13 +114,18 @@ export const useAppStore = defineStore('app', () => {
   // Actions - 下载任务管理
   const loadDownloadTasks = async (page = 1, pageSize = 20) => {
     const result = await api.download.getTasks(page, pageSize)
-    downloadTasks.value = result.tasks
-    return result
+    if (result && result.tasks) {
+      downloadTasks.value = result.tasks || []
+      return result
+    } else {
+      downloadTasks.value = []
+      return { tasks: [], total: 0 }
+    }
   }
 
   const getActiveDownloads = async () => {
     const result = await api.download.getActiveDownloads()
-    return result
+    return result || []
   }
 
   const pauseTask = async (taskId: number) => {
@@ -141,18 +146,18 @@ export const useAppStore = defineStore('app', () => {
   // Actions - 统计数据
   const loadStatistics = async (days = 30) => {
     const result = await api.stats.getStatistics(days)
-    statistics.value = result
-    return result
+    statistics.value = result || []
+    return result || []
   }
 
   // Actions - 服务状态
   const checkServiceStatus = async () => {
     const result = await api.system.getServiceStatus()
     serviceStatus.value = {
-      email: result.email || false,
-      download: result.download || false
+      email: result?.email || false,
+      download: result?.download || false
     }
-    return result
+    return result || { email: false, download: false }
   }
 
   // Actions - 系统操作

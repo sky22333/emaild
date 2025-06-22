@@ -153,18 +153,36 @@ func (ts *TrayService) loadIcon() []byte {
 	// 尝试从多个位置加载图标
 	iconPaths := []string{
 		"assets/icon.ico",
-		"assets/icon.png", 
+		"assets/icon.png",
+		"./assets/icon.ico", 
+		"./assets/icon.png",
 		"icon.ico",
 		"icon.png",
+		"build/icon.ico",
+		"build/icon.png",
+	}
+	
+	// 获取可执行文件目录
+	if execPath, err := os.Executable(); err == nil {
+		execDir := filepath.Dir(execPath)
+		iconPaths = append(iconPaths, 
+			filepath.Join(execDir, "assets", "icon.ico"),
+			filepath.Join(execDir, "assets", "icon.png"),
+			filepath.Join(execDir, "icon.ico"),
+			filepath.Join(execDir, "icon.png"),
+		)
 	}
 	
 	for _, iconPath := range iconPaths {
 		if iconData, err := os.ReadFile(iconPath); err == nil {
 			ts.logger.Infof("成功加载托盘图标: %s", iconPath)
 			return iconData
+		} else {
+			ts.logger.Debugf("图标路径不存在: %s, 错误: %v", iconPath, err)
 		}
 	}
 	
+	ts.logger.Warn("未找到自定义图标，将使用默认图标")
 	return nil
 }
 

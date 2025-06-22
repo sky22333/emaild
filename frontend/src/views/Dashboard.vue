@@ -176,7 +176,6 @@ const appStore = useAppStore()
 const { withErrorHandling, isLoading, error, clearError } = useErrorHandler()
 
 // 响应式数据
-const recentTasks = ref<DownloadTask[]>([])
 const stats = ref({
   totalAccounts: 0,
   activeAccounts: 0,
@@ -190,6 +189,53 @@ const stats = ref({
 const completionRate = computed(() => {
   if (stats.value.totalTasks === 0) return 0
   return Math.round((stats.value.completedTasks / stats.value.totalTasks) * 100)
+})
+
+const dashboardStats = computed(() => {
+  const accounts = appStore.emailAccounts || []
+  const tasks = appStore.downloadTasks || []
+  
+  return {
+    totalAccounts: accounts.length,
+    activeAccounts: accounts.filter(a => a.is_active).length,
+    totalTasks: tasks.length,
+    runningTasks: tasks.filter(t => t.status === 'downloading').length,
+    completedTasks: tasks.filter(t => t.status === 'completed').length,
+    failedTasks: tasks.filter(t => t.status === 'failed').length
+  }
+})
+
+const recentTasks = computed(() => {
+  const tasks = appStore.downloadTasks || []
+  return tasks
+    .slice()
+    .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+    .slice(0, 5)
+})
+
+const chartData = computed(() => {
+  const tasks = appStore.downloadTasks || []
+  const last7Days = []
+  const now = new Date()
+  
+  for (let i = 6; i >= 0; i--) {
+    const date = new Date(now)
+    date.setDate(date.getDate() - i)
+    const dateStr = date.toISOString().split('T')[0]
+    
+    const dayTasks = tasks.filter(task => {
+      const taskDate = new Date(task.created_at || 0).toISOString().split('T')[0]
+      return taskDate === dateStr
+    })
+    
+    last7Days.push({
+      date: dateStr,
+      completed: dayTasks.filter(t => t.status === 'completed').length,
+      failed: dayTasks.filter(t => t.status === 'failed').length
+    })
+  }
+  
+  return last7Days
 })
 
 // 方法

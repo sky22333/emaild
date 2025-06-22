@@ -206,7 +206,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, h } from 'vue'
+import { ref, computed, onMounted, reactive, h } from 'vue'
 import { useErrorHandler } from '../composables/useErrorHandler'
 import {
   NButton,
@@ -220,12 +220,15 @@ import {
   NInputNumber,
   NSwitch,
   NSpace,
-  useMessage
+  useMessage,
+  useDialog
 } from 'naive-ui'
 import { useAppStore } from '../stores/app'
 
 const appStore = useAppStore()
+const { withErrorHandling, isLoading, error, clearError } = useErrorHandler()
 const message = useMessage()
+const dialog = useDialog()
 
 // 响应式数据
 const showAddModal = ref(false)
@@ -238,42 +241,56 @@ const deleting = ref(false)
 
 // 表单相关
 const accountFormRef = ref()
-const currentAccount = reactive({
-  id: null,
+const currentAccount = ref({
+  id: 0,
+  name: '',
   email: '',
   password: '',
-  imapServer: '',
-  imapPort: 993,
-  useSSL: true,
-  isActive: true,
-  connectionStatus: 'disconnected',
-  lastCheck: '',
-  processedCount: 0
+  imap_server: '',
+  imap_port: 993,
+  use_ssl: true,
+  is_active: true,
+  created_at: '',
+  updated_at: ''
 })
 
 // 表单验证规则
 const accountRules = {
   email: [
-    { required: true, message: '请输入邮箱地址', trigger: ['input', 'blur'] },
-    { type: 'email', message: '请输入正确的邮箱地址', trigger: ['input', 'blur'] }
+    { required: true, message: '请输入邮箱地址' },
+    { type: 'email', message: '请输入有效的邮箱地址' }
   ],
   password: [
-    { required: true, message: '请输入邮箱密码', trigger: ['input', 'blur'] }
+    { required: true, message: '请输入邮箱密码或授权码' }
   ],
-  imapServer: [
-    { required: true, message: '请输入IMAP服务器', trigger: ['input', 'blur'] }
+  imap_server: [
+    { required: true, message: '请输入IMAP服务器地址' }
   ],
-  imapPort: [
-    { required: true, message: '请输入IMAP端口', trigger: ['input', 'blur'] }
+  imap_port: [
+    { required: true, type: 'number', message: '请输入有效的端口号' }
   ]
 }
 
 // 邮箱账户列表
-const emailAccounts = computed(() => appStore.emailAccounts)
+const emailAccounts = computed(() => {
+  const accounts = appStore.emailAccounts || []
+  return accounts.map(account => ({
+    ...account,
+    expanded: account.expanded || false,
+    testing: account.testing || false,
+    checking: account.checking || false,
+    stats: account.stats || {
+      todayEmails: 0,
+      totalDownloads: 0,
+      totalSize: 0,
+      successRate: 0
+    }
+  }))
+})
 
 // 组件挂载
 onMounted(() => {
-  appStore.loadEmailAccounts()
+  loadEmailAccounts()
 })
 
 // 获取账户操作菜单
@@ -288,6 +305,7 @@ const getAccountActions = (account: any) => {
   
   actions.push(
     { label: '测试连接', key: 'test' },
+    { label: '检查邮件', key: 'check' },
     { label: '编辑账户', key: 'edit' },
     { label: '删除账户', key: 'delete' }
   )
@@ -296,14 +314,17 @@ const getAccountActions = (account: any) => {
 }
 
 // 处理账户操作
-const handleAccountAction = (key: string, account: any) => {
+const handleAccountAction = async (key: string, account: any) => {
   switch (key) {
     case 'enable':
     case 'disable':
-      toggleAccountStatus(account)
+      await toggleAccount(account)
       break
     case 'test':
-      testAccountConnection(account)
+      await testConnection(account)
+      break
+    case 'check':
+      await checkEmails(account)
       break
     case 'edit':
       editAccount(account)
@@ -315,43 +336,52 @@ const handleAccountAction = (key: string, account: any) => {
 }
 
 // 切换账户启用状态
-const toggleAccountStatus = async (account: any) => {
-  try {
-    await appStore.toggleEmailAccount(account.id)
-    account.isActive = !account.isActive
-    message.success(account.isActive ? '账户已启用' : '账户已禁用')
-  } catch (error) {
-    message.error('操作失败')
-  }
+const toggleAccount = async (account: any) => {
+  await withErrorHandling(async () => {
+    const updatedAccount = { ...account, is_active: !account.is_active }
+    await appStore.updateEmailAccount(updatedAccount)
+    message.success(account.is_active ? '账户已启用' : '账户已禁用')
+  }, '切换账户状态')
 }
 
 // 测试账户连接
-const testAccountConnection = async (account: any) => {
+const testConnection = async (account: any) => {
+  testing.value = true
+  
   try {
-    testing.value = true
-    const result = await appStore.testEmailConnection(account.id)
-    if (result.success) {
+    await withErrorHandling(async () => {
+      await appStore.testEmailConnection(account.id)
       message.success('连接测试成功')
-    } else {
-      message.error(`连接测试失败: ${result.error}`)
-    }
-  } catch (error) {
-    message.error('连接测试失败')
+    }, '测试邮箱连接')
   } finally {
     testing.value = false
+  }
+}
+
+// 检查邮件
+const checkEmails = async (account: any) => {
+  account.checking = true
+  
+  try {
+    await withErrorHandling(async () => {
+      const result = await appStore.checkSingleEmail(account.id)
+      message.success(`检查完成：发现 ${result.new_emails} 封新邮件，${result.pdfs_found} 个PDF文件`)
+    }, '检查邮件')
+  } finally {
+    account.checking = false
   }
 }
 
 // 编辑账户
 const editAccount = (account: any) => {
   editingAccount.value = account
-  Object.assign(currentAccount, {
+  Object.assign(currentAccount.value, {
     email: account.email,
     password: '', // 出于安全考虑，不显示密码
-    imapServer: account.imapServer,
-    imapPort: account.imapPort,
-    useSSL: account.useSSL,
-    isActive: account.isActive,
+    imap_server: account.imapServer,
+    imap_port: account.imapPort,
+    use_ssl: account.useSSL,
+    is_active: account.isActive,
     connectionStatus: account.connectionStatus,
     lastCheck: account.lastCheck,
     processedCount: account.processedCount
@@ -367,13 +397,17 @@ const deleteAccount = (account: any) => {
 
 // 确认删除
 const confirmDelete = async () => {
+  if (!deletingAccount.value) return
+  
+  deleting.value = true
+  
   try {
-    deleting.value = true
-    await appStore.deleteEmailAccount(deletingAccount.value.id)
-    message.success('账户已删除')
-    showDeleteDialog.value = false
-  } catch (error) {
-    message.error('删除失败')
+    await withErrorHandling(async () => {
+      await appStore.deleteEmailAccount(deletingAccount.value.id)
+      message.success('账户已删除')
+      showDeleteDialog.value = false
+      deletingAccount.value = null
+    }, '删除邮箱账户')
   } finally {
     deleting.value = false
   }
@@ -384,53 +418,25 @@ const toggleExpanded = (account: any) => {
   account.expanded = !account.expanded
 }
 
-// 检查邮件
-const checkEmails = async (account: any) => {
-  try {
-    account.checking = true
-    await appStore.checkAccountEmails(account.id)
-    message.success('邮件检查完成')
-  } catch (error) {
-    message.error('检查邮件失败')
-  } finally {
-    account.checking = false
-  }
-}
-
-// 测试连接
-const testConnection = async (account: any) => {
-  try {
-    testing.value = true
-    const result = await appStore.testEmailConnection(account.id)
-    if (result.success) {
-      message.success('连接测试成功')
-    } else {
-      message.error(`连接测试失败: ${result.error}`)
-    }
-  } catch (error) {
-    message.error('连接测试失败')
-  } finally {
-    testing.value = false
-  }
-}
-
 // 保存账户
 const saveAccount = async () => {
+  if (!accountFormRef.value) return
+  
   try {
-    await accountFormRef.value?.validate()
+    await accountFormRef.value.validate()
     saving.value = true
     
     if (editingAccount.value) {
-      await appStore.updateEmailAccount(editingAccount.value.id, currentAccount)
+      await appStore.updateEmailAccount(editingAccount.value.id, currentAccount.value)
       message.success('账户已更新')
     } else {
-      await appStore.addEmailAccount(currentAccount)
+      await appStore.addEmailAccount(currentAccount.value)
       message.success('账户已添加')
     }
     
     showAddModal.value = false
     resetForm()
-    loadAccounts()
+    loadEmailAccounts()
   } catch (error) {
     message.error('保存失败')
   } finally {
@@ -439,24 +445,24 @@ const saveAccount = async () => {
 }
 
 const resetForm = () => {
-  currentAccount.id = null
-  currentAccount.email = ''
-  currentAccount.password = ''
-  currentAccount.imapServer = ''
-  currentAccount.imapPort = 993
-  currentAccount.useSSL = true
-  currentAccount.isActive = true
-  currentAccount.connectionStatus = 'disconnected'
-  currentAccount.lastCheck = ''
-  currentAccount.processedCount = 0
+  currentAccount.value = {
+    id: 0,
+    name: '',
+    email: '',
+    password: '',
+    imap_server: '',
+    imap_port: 993,
+    use_ssl: true,
+    is_active: true,
+    created_at: '',
+    updated_at: ''
+  }
 }
 
-const loadAccounts = async () => {
-  try {
-    appStore.loadEmailAccounts()
-  } catch (error) {
-    console.error('加载邮箱账户失败:', error)
-  }
+const loadEmailAccounts = async () => {
+  await withErrorHandling(async () => {
+    await appStore.loadEmailAccounts()
+  }, '加载邮箱账户')
 }
 
 const formatFileSize = (bytes: number): string => {

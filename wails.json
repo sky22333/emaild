@@ -19,16 +19,38 @@
   },
   "windows": [
     {
+      "title": "邮件附件下载器",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 800,
+      "minHeight": 600,
+      "disableResize": false,
+      "fullscreen": false,
+      "resizable": true,
+      "maximised": false,
+      "alwaysOnTop": false,
+      "hideWindowOnClose": true,
+      "backgroundColor": "#ffffff",
       "icon": "assets/icon.ico"
     }
   ],
   "linux": [
     {
+      "title": "邮件附件下载器",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 800,
+      "minHeight": 600,
       "icon": "assets/icon.png"
     }
   ],
   "darwin": [
     {
+      "title": "邮件附件下载器",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 800,
+      "minHeight": 600,
       "icon": "assets/icon.png"
     }
   ],
@@ -38,7 +60,7 @@
   "wailsjsdir": "./frontend/src",
   "version": "2",
   "debounceMS": 100,
-  "devServer": "localhost:34115",
+  "devServer": "localhost:34116",
   "appargs": "",
   "build:dir": "build",
   "frontend:dir": "frontend",
