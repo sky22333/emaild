@@ -58,7 +58,14 @@ func (a *App) OnStartup(ctx context.Context) {
 	// 初始化数据库
 	db, err := database.NewDatabase()
 	if err != nil {
-		a.logger.Fatalf("数据库初始化失败: %v", err)
+		a.logger.Errorf("数据库初始化失败: %v", err)
+		// 显示错误对话框给用户
+		runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
+			Type:    runtime.ErrorDialog,
+			Title:   "数据库初始化失败",
+			Message: fmt.Sprintf("无法初始化数据库，请检查文件权限和磁盘空间。\n错误信息: %v", err),
+		})
+		return
 	}
 	a.db = db
 

@@ -2,17 +2,21 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime/quotedprintable"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"emaild/backend/database"
 	"emaild/backend/models"
 	"emaild/backend/utils"
+	"github.com/emersion/go-imap"
 )
 
 // DownloadService 下载服务
@@ -69,10 +73,16 @@ func NewDownloadService(db *database.Database) *DownloadService {
 
 // taskScheduler 任务调度器
 func (ds *DownloadService) taskScheduler() {
+	retryTicker := time.NewTicker(5 * time.Second) // 每5秒检查一次待处理任务
+	defer retryTicker.Stop()
+	
+	var pendingTasks []*models.DownloadTask // 待处理任务队列
+	
 	for {
 		select {
 		case <-ds.ctx.Done():
 			return
+			
 		case task := <-ds.taskQueue:
 			// 检查是否可以启动新任务
 			ds.activeWorkerMutex.RLock()
@@ -82,14 +92,51 @@ func (ds *DownloadService) taskScheduler() {
 			if canStart {
 				go ds.startDownload(task)
 			} else {
-				// 重新放入队列等待
-				select {
-				case ds.taskQueue <- task:
-				default:
-					// 队列满了，更新任务状态为失败
-					ds.updateTaskStatus(task.ID, models.StatusFailed, "任务队列已满", 0, 0, "")
+				// 加入待处理队列
+				pendingTasks = append(pendingTasks, task)
+			}
+			
+		case <-retryTicker.C:
+			// 定期检查待处理任务
+			if len(pendingTasks) == 0 {
+				continue
+			}
+			
+			ds.activeWorkerMutex.RLock()
+			availableSlots := ds.maxConcurrent - ds.activeWorkers
+			ds.activeWorkerMutex.RUnlock()
+			
+			if availableSlots > 0 {
+				// 启动尽可能多的任务
+				toStart := availableSlots
+				if len(pendingTasks) < toStart {
+					toStart = len(pendingTasks)
+				}
+				
+				for i := 0; i < toStart; i++ {
+					go ds.startDownload(pendingTasks[i])
+				}
+				
+				// 移除已启动的任务
+				pendingTasks = pendingTasks[toStart:]
+			}
+			
+			// 清理过期的待处理任务（超过10分钟）
+			now := time.Now()
+			var validTasks []*models.DownloadTask
+			for _, task := range pendingTasks {
+				if createdAt, err := time.Parse("2006-01-02 15:04:05", task.CreatedAt); err == nil {
+					if now.Sub(createdAt) < 10*time.Minute {
+						validTasks = append(validTasks, task)
+					} else {
+						// 任务过期，标记为失败
+						ds.updateTaskStatus(task.ID, models.StatusFailed, "任务排队超时", 0, 0, "")
+					}
+				} else {
+					validTasks = append(validTasks, task) // 保留无法解析时间的任务
 				}
 			}
+			pendingTasks = validTasks
 		}
 	}
 }
@@ -277,38 +324,247 @@ func (ds *DownloadService) downloadFromURL(worker *DownloadWorker) error {
 
 // downloadAttachment 下载邮件附件
 func (ds *DownloadService) downloadAttachment(worker *DownloadWorker) error {
-	// 这里需要重新连接到邮箱获取附件
-	// 为了简化，先创建一个空文件标记完成
 	task := worker.Task
 	
-	file, err := os.Create(task.LocalPath)
+	// 创建邮件服务来获取附件
+	emailService := &EmailService{
+		db:          ds.db,
+		connections: make(map[uint]*IMAPConnection),
+		ctx:         worker.Context,
+	}
+	
+	// 获取邮箱账户信息
+	account := &task.EmailAccount
+	if account.ID == 0 {
+		return fmt.Errorf("无效的邮箱账户信息")
+	}
+	
+	// 连接到邮箱
+	conn, err := emailService.createConnectionWithTimeout(worker.Context, account)
 	if err != nil {
-		return fmt.Errorf("创建文件失败: %v", err)
+		return fmt.Errorf("连接邮箱失败: %v", err)
 	}
-	defer file.Close()
+	defer conn.close()
 	
-	// 模拟下载进度
-	for i := 0; i <= 100; i += 10 {
-		select {
-		case <-worker.Context.Done():
-			return fmt.Errorf("下载被取消")
-		default:
-			worker.Progress <- ProgressUpdate{
-				TaskID:   task.ID,
-				Progress: float64(i),
-				Status:   models.StatusDownloading,
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
+	// 选择收件箱
+	if err := conn.selectInbox(); err != nil {
+		return fmt.Errorf("选择收件箱失败: %v", err)
 	}
 	
+	// 搜索包含指定附件的邮件
+	attachmentData, err := ds.findAndDownloadAttachment(conn, task)
+	if err != nil {
+		return fmt.Errorf("下载附件失败: %v", err)
+	}
+	
+	if len(attachmentData) == 0 {
+		return fmt.Errorf("未找到指定的附件")
+	}
+	
+	// 验证是否为有效的PDF文件
+	if !utils.IsPDFContent(attachmentData) {
+		return fmt.Errorf("附件不是有效的PDF文件")
+	}
+	
+	// 创建目录
+	if err := os.MkdirAll(filepath.Dir(task.LocalPath), 0755); err != nil {
+		return fmt.Errorf("创建目录失败: %v", err)
+	}
+	
+	// 写入文件
+	if err := os.WriteFile(task.LocalPath, attachmentData, 0644); err != nil {
+		return fmt.Errorf("写入文件失败: %v", err)
+	}
+	
+	// 验证写入的文件
+	if err := utils.ValidatePDFFile(task.LocalPath); err != nil {
+		os.Remove(task.LocalPath) // 删除无效文件
+		return fmt.Errorf("PDF文件验证失败: %v", err)
+	}
+	
+	// 发送完成进度
 	worker.Progress <- ProgressUpdate{
-		TaskID: task.ID,
-		Status: models.StatusCompleted,
-		Progress: 100,
+		TaskID:         task.ID,
+		DownloadedSize: int64(len(attachmentData)),
+		Progress:       100,
+		Status:         models.StatusCompleted,
 	}
 	
 	return nil
+}
+
+// findAndDownloadAttachment 查找并下载指定的附件
+func (ds *DownloadService) findAndDownloadAttachment(conn *IMAPConnection, task *models.DownloadTask) ([]byte, error) {
+	// 搜索包含指定主题和发件人的邮件
+	criteria := imap.NewSearchCriteria()
+	
+	// 使用邮件主题和发件人作为搜索条件
+	if task.Subject != "" {
+		criteria.Header.Set("Subject", task.Subject)
+	}
+	if task.Sender != "" {
+		criteria.Header.Set("From", task.Sender)
+	}
+	
+	conn.Mutex.Lock()
+	uids, err := conn.Client.Search(criteria)
+	conn.Mutex.Unlock()
+	
+	if err != nil {
+		return nil, fmt.Errorf("搜索邮件失败: %v", err)
+	}
+	
+	if len(uids) == 0 {
+		return nil, fmt.Errorf("未找到匹配的邮件")
+	}
+	
+	// 遍历找到的邮件，查找指定的附件
+	for _, uid := range uids {
+		attachmentData, err := ds.extractAttachmentFromMessage(conn, uid, task.FileName)
+		if err != nil {
+			continue // 继续尝试下一封邮件
+		}
+		if len(attachmentData) > 0 {
+			return attachmentData, nil
+		}
+	}
+	
+	return nil, fmt.Errorf("在匹配的邮件中未找到指定的附件: %s", task.FileName)
+}
+
+// extractAttachmentFromMessage 从指定邮件中提取附件
+func (ds *DownloadService) extractAttachmentFromMessage(conn *IMAPConnection, uid uint32, targetFilename string) ([]byte, error) {
+	seqset := new(imap.SeqSet)
+	seqset.AddNum([]uint32{uid}...)
+	
+	messages := make(chan *imap.Message, 1)
+	
+	conn.Mutex.Lock()
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Client.Fetch(seqset, []imap.FetchItem{
+			imap.FetchBodyStructure,
+			imap.FetchBody,
+		}, messages)
+	}()
+	conn.Mutex.Unlock()
+	
+	msg := <-messages
+	if err := <-done; err != nil {
+		return nil, fmt.Errorf("获取邮件内容失败: %v", err)
+	}
+	
+	if msg == nil || msg.BodyStructure == nil {
+		return nil, fmt.Errorf("邮件结构为空")
+	}
+	
+	// 递归查找PDF附件
+	return ds.findPDFAttachmentInStructure(conn, uid, msg.BodyStructure, targetFilename)
+}
+
+// findPDFAttachmentInStructure 在邮件结构中递归查找PDF附件
+func (ds *DownloadService) findPDFAttachmentInStructure(conn *IMAPConnection, uid uint32, bs *imap.BodyStructure, targetFilename string) ([]byte, error) {
+	// 检查当前部分是否为PDF附件
+	if strings.ToLower(bs.MIMEType) == "application" && strings.ToLower(bs.MIMESubType) == "pdf" {
+		// 获取附件文件名
+		var fileName string
+		if bs.Disposition == "attachment" && bs.Params != nil {
+			if name, exists := bs.Params["filename"]; exists {
+				fileName = name
+			}
+		}
+		if fileName == "" && bs.Params != nil {
+			if name, exists := bs.Params["name"]; exists {
+				fileName = name
+			}
+		}
+		
+		// 清理文件名并比较
+		cleanedFileName := utils.CleanFilename(fileName)
+		cleanedTargetName := utils.CleanFilename(targetFilename)
+		
+		if cleanedFileName == cleanedTargetName || fileName == targetFilename {
+			// 找到目标附件，获取其内容
+			return ds.downloadAttachmentPart(conn, uid, bs)
+		}
+	}
+	
+	// 递归搜索子部分
+	for _, part := range bs.Parts {
+		if data, err := ds.findPDFAttachmentInStructure(conn, uid, part, targetFilename); err == nil && len(data) > 0 {
+			return data, nil
+		}
+	}
+	
+	return nil, fmt.Errorf("未找到指定的PDF附件")
+}
+
+// downloadAttachmentPart 下载指定的附件部分
+func (ds *DownloadService) downloadAttachmentPart(conn *IMAPConnection, uid uint32, bs *imap.BodyStructure) ([]byte, error) {
+	seqset := new(imap.SeqSet)
+	seqset.AddNum([]uint32{uid}...)
+	
+	// 构建body section
+	section := &imap.BodySectionName{}
+	
+	messages := make(chan *imap.Message, 1)
+	
+	conn.Mutex.Lock()
+	done := make(chan error, 1)
+	go func() {
+		done <- conn.Client.Fetch(seqset, []imap.FetchItem{
+			section.FetchItem(),
+		}, messages)
+	}()
+	conn.Mutex.Unlock()
+	
+	msg := <-messages
+	if err := <-done; err != nil {
+		return nil, fmt.Errorf("获取附件内容失败: %v", err)
+	}
+	
+	if msg == nil {
+		return nil, fmt.Errorf("邮件为空")
+	}
+	
+	// 获取body内容
+	for _, body := range msg.Body {
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("读取附件数据失败: %v", err)
+		}
+		
+		// 根据编码方式解码
+		if bs.Encoding != "" {
+			return ds.decodeAttachmentData(data, bs.Encoding)
+		}
+		
+		return data, nil
+	}
+	
+	return nil, fmt.Errorf("未找到附件数据")
+}
+
+// decodeAttachmentData 根据编码方式解码附件数据
+func (ds *DownloadService) decodeAttachmentData(data []byte, encoding string) ([]byte, error) {
+	switch strings.ToLower(encoding) {
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(string(data))
+		if err != nil {
+			return nil, fmt.Errorf("Base64解码失败: %v", err)
+		}
+		return decoded, nil
+	case "quoted-printable":
+		reader := quotedprintable.NewReader(strings.NewReader(string(data)))
+		decoded, err := io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("Quoted-Printable解码失败: %v", err)
+		}
+		return decoded, nil
+	default:
+		// 无编码或未知编码，直接返回原始数据
+		return data, nil
+	}
 }
 
 // downloadWithProgress 带进度的下载
