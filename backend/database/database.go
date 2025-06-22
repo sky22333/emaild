@@ -31,14 +31,6 @@ func NewDatabase() (*Database, error) {
 		return nil, fmt.Errorf("创建数据目录失败: %v", err)
 	}
 
-	// 移除旧的数据目录
-	if _, err := os.Stat("./data"); err == nil {
-		if err := os.RemoveAll("./data"); err != nil {
-			// 记录错误但不阻止启动
-			fmt.Printf("移除旧数据目录失败: %v\n", err)
-		}
-	}
-
 	dbPath := filepath.Join(appDataDir, "emaild.db")
 	
 	// 打开SQLite数据库
