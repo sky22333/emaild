@@ -32,15 +32,7 @@ const routes: RouteRecordRaw[] = [
           icon: 'download'
         }
       },
-      {
-        path: '/statistics',
-        name: 'statistics',
-        component: () => import('../views/Statistics.vue'),
-        meta: {
-          title: '统计分析',
-          icon: 'chart'
-        }
-      },
+
       {
         path: '/settings',
         name: 'settings',

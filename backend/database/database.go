@@ -1,10 +1,13 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"emaild/backend/models"
@@ -15,17 +18,30 @@ import (
 // Database 数据库连接管理器
 type Database struct {
 	DB *sql.DB
+	mu sync.RWMutex // 保护数据库操作的读写锁
 }
 
-// withTransaction 执行事务的通用方法
-func (d *Database) withTransaction(fn func(*sql.Tx) error) error {
-	tx, err := d.DB.Begin()
+// WithTransaction 执行事务的通用方法（增强版）
+func (d *Database) WithTransaction(fn func(*sql.Tx) error) error {
+	return d.WithTransactionTimeout(fn, 30*time.Second)
+}
+
+// WithTransactionTimeout 带超时的事务执行
+func (d *Database) WithTransactionTimeout(fn func(*sql.Tx) error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	
+	tx, err := d.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("开始事务失败: %v", err)
 	}
+	
 	defer func() {
 		if err != nil {
-			tx.Rollback()
+			if rollbackErr := tx.Rollback(); rollbackErr != nil {
+				// 记录回滚错误，但不覆盖原始错误
+				fmt.Printf("事务回滚失败: %v\n", rollbackErr)
+			}
 		}
 	}()
 
@@ -34,7 +50,63 @@ func (d *Database) withTransaction(fn func(*sql.Tx) error) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("提交事务失败: %v", err)
+	}
+
+	return nil
+}
+
+// WithRetry 带重试的数据库操作
+func (d *Database) WithRetry(operation func() error, maxRetries int) error {
+	var lastErr error
+	
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// 指数退避
+			backoff := time.Duration(attempt) * time.Second
+			if backoff > 5*time.Second {
+				backoff = 5 * time.Second
+			}
+			time.Sleep(backoff)
+		}
+		
+		lastErr = operation()
+		if lastErr == nil {
+			return nil
+		}
+		
+		// 检查是否是可重试的错误
+		if !isRetryableError(lastErr) {
+			break
+		}
+	}
+	
+	return fmt.Errorf("操作失败，已重试 %d 次: %v", maxRetries, lastErr)
+}
+
+// isRetryableError 判断错误是否可重试
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	errStr := strings.ToLower(err.Error())
+	retryableErrors := []string{
+		"database is locked",
+		"database is busy",
+		"connection reset",
+		"timeout",
+		"temporary failure",
+	}
+	
+	for _, retryableErr := range retryableErrors {
+		if strings.Contains(errStr, retryableErr) {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // NewDatabase 创建新的数据库连接
@@ -59,28 +131,39 @@ func NewDatabase() (*Database, error) {
 		return nil, fmt.Errorf("连接数据库失败: %v", err)
 	}
 
-	// 设置连接池参数
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(25)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// 优化连接池参数
+	db.SetMaxOpenConns(10)        // 减少最大连接数，避免资源竞争
+	db.SetMaxIdleConns(5)         // 设置合理的空闲连接数
+	db.SetConnMaxLifetime(15 * time.Minute) // 延长连接生命周期
 
-	// 启用外键约束和WAL模式
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, fmt.Errorf("启用外键约束失败: %v", err)
+	// 启用关键的SQLite配置
+	pragmas := []string{
+		"PRAGMA foreign_keys = ON",           // 启用外键约束
+		"PRAGMA journal_mode = WAL",          // 启用WAL模式
+		"PRAGMA synchronous = NORMAL",        // 平衡性能和安全性
+		"PRAGMA cache_size = 10000",          // 增加缓存大小
+		"PRAGMA temp_store = memory",         // 临时表存储在内存中
+		"PRAGMA busy_timeout = 30000",        // 设置忙碌超时为30秒
 	}
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
-		return nil, fmt.Errorf("启用WAL模式失败: %v", err)
+
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("执行PRAGMA失败 (%s): %v", pragma, err)
+		}
 	}
 
 	database := &Database{DB: db}
 
 	// 创建表结构
 	if err := database.createTables(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("创建表结构失败: %v", err)
 	}
 
 	// 初始化默认配置
 	if err := database.initDefaultConfig(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("初始化默认配置失败: %v", err)
 	}
 
@@ -226,7 +309,7 @@ func (d *Database) initDefaultConfig() error {
 func (d *Database) CreateEmailAccount(account *models.EmailAccount) error {
 	now := time.Now()
 	
-	return d.withTransaction(func(tx *sql.Tx) error {
+	return d.WithTransaction(func(tx *sql.Tx) error {
 		query := `
 			INSERT INTO email_accounts (name, email, password, imap_server, imap_port, use_ssl, is_active, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -312,7 +395,7 @@ func (d *Database) GetEmailAccountByID(id uint) (*models.EmailAccount, error) {
 func (d *Database) UpdateEmailAccount(account *models.EmailAccount) error {
 	now := time.Now()
 	
-	return d.withTransaction(func(tx *sql.Tx) error {
+	return d.WithTransaction(func(tx *sql.Tx) error {
 		query := `
 			UPDATE email_accounts 
 			SET name = ?, email = ?, password = ?, imap_server = ?, imap_port = ?, 
@@ -470,7 +553,8 @@ func (d *Database) queryDownloadTasksWithJoin(query string, args ...interface{})
 	for rows.Next() {
 		var task models.DownloadTask
 		var account models.EmailAccount
-		var taskCreatedAt, taskUpdatedAt, accountCreatedAt, accountUpdatedAt time.Time
+		var taskCreatedAt, taskUpdatedAt sql.NullTime
+		var accountCreatedAt, accountUpdatedAt sql.NullTime
 		var accountID sql.NullInt64
 		var accountName, accountEmail, accountPassword, accountIMAPServer sql.NullString
 		var accountIMAPPort sql.NullInt64
@@ -485,9 +569,18 @@ func (d *Database) queryDownloadTasksWithJoin(query string, args ...interface{})
 			return nil, err
 		}
 		
-		// 转换时间
-		task.CreatedAt = models.TimeToString(taskCreatedAt)
-		task.UpdatedAt = models.TimeToString(taskUpdatedAt)
+		// 转换时间 - 处理NULL值
+		if taskCreatedAt.Valid {
+			task.CreatedAt = models.TimeToString(taskCreatedAt.Time)
+		} else {
+			task.CreatedAt = models.TimeToString(time.Now())
+		}
+		
+		if taskUpdatedAt.Valid {
+			task.UpdatedAt = models.TimeToString(taskUpdatedAt.Time)
+		} else {
+			task.UpdatedAt = models.TimeToString(time.Now())
+		}
 		
 		// 设置邮箱账户信息
 		if accountID.Valid {
@@ -513,8 +606,20 @@ func (d *Database) queryDownloadTasksWithJoin(query string, args ...interface{})
 			if accountIsActive.Valid {
 				account.IsActive = accountIsActive.Bool
 			}
-			account.CreatedAt = models.TimeToString(accountCreatedAt)
-			account.UpdatedAt = models.TimeToString(accountUpdatedAt)
+			
+			// 处理账户时间字段的NULL值
+			if accountCreatedAt.Valid {
+				account.CreatedAt = models.TimeToString(accountCreatedAt.Time)
+			} else {
+				account.CreatedAt = models.TimeToString(time.Now())
+			}
+			
+			if accountUpdatedAt.Valid {
+				account.UpdatedAt = models.TimeToString(accountUpdatedAt.Time)
+			} else {
+				account.UpdatedAt = models.TimeToString(time.Now())
+			}
+			
 			task.EmailAccount = account
 		}
 		

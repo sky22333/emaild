@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,6 +43,12 @@ type EmailService struct {
 	isRunning        bool                       // 是否正在运行
 	runningMutex     sync.RWMutex               // 保护运行状态的锁
 	logger           *logrus.Logger
+	
+	// 优雅关闭相关
+	wg              sync.WaitGroup    // 等待所有goroutine完成
+	shutdownOnce    sync.Once         // 确保只关闭一次
+	isShuttingDown  bool              // 关闭状态标记
+	shutdownMutex   sync.RWMutex      // 保护关闭状态的锁
 }
 
 // IMAPConnection IMAP连接管理
@@ -54,6 +61,7 @@ type IMAPConnection struct {
 	Mutex       sync.Mutex // 连接级别的锁
 	ctx         context.Context
 	cancel      context.CancelFunc
+	closeOnce   sync.Once  // 确保连接只关闭一次
 }
 
 // 使用backend包中的EmailCheckResult定义
@@ -71,7 +79,17 @@ func NewEmailService(db *database.Database, downloadService *DownloadService, lo
 		checkInterval:    5 * time.Minute, // 默认5分钟检查一次
 		isRunning:        false,
 		logger:           logger,
+		isShuttingDown:   false,
 	}
+}
+
+// SetCheckInterval 设置检查间隔
+func (es *EmailService) SetCheckInterval(interval time.Duration) {
+	es.runningMutex.Lock()
+	defer es.runningMutex.Unlock()
+	
+	es.checkInterval = interval
+	es.logger.Infof("邮件检查间隔已设置为: %v", interval)
 }
 
 // StartEmailMonitoring 启动邮件监控
@@ -87,9 +105,11 @@ func (es *EmailService) StartEmailMonitoring() error {
 	es.logger.Info("启动邮件监控服务")
 	
 	// 启动邮件检查器
+	es.wg.Add(1)
 	go es.emailChecker()
 	
 	// 启动连接清理器
+	es.wg.Add(1)
 	go es.connectionCleaner()
 	
 	return nil
@@ -97,35 +117,72 @@ func (es *EmailService) StartEmailMonitoring() error {
 
 // StopEmailMonitoring 停止邮件监控
 func (es *EmailService) StopEmailMonitoring() {
-	es.runningMutex.Lock()
-	defer es.runningMutex.Unlock()
-	
-	if !es.isRunning {
-		return
-	}
-	
-	es.isRunning = false
-	es.cancel()
-	
-	// 关闭所有连接
-	es.connectionsMutex.Lock()
-	for _, conn := range es.connections {
-		conn.close()
-	}
-	es.connections = make(map[uint]*IMAPConnection)
-	es.connectionsMutex.Unlock()
+	es.shutdownOnce.Do(func() {
+		es.logger.Info("开始停止邮件监控服务")
+		
+		es.runningMutex.Lock()
+		if !es.isRunning {
+			es.runningMutex.Unlock()
+			return
+		}
+		es.isRunning = false
+		es.runningMutex.Unlock()
+		
+		// 设置关闭状态
+		es.shutdownMutex.Lock()
+		es.isShuttingDown = true
+		es.shutdownMutex.Unlock()
+		
+		// 取消上下文
+		es.cancel()
+		
+		// 等待所有goroutine完成（带超时）
+		done := make(chan struct{})
+		go func() {
+			es.wg.Wait()
+			close(done)
+		}()
+		
+		select {
+		case <-done:
+			es.logger.Info("所有邮件服务goroutine已正常退出")
+		case <-time.After(30 * time.Second):
+			es.logger.Warn("等待邮件服务goroutine退出超时，强制退出")
+		}
+		
+		// 关闭所有连接
+		es.connectionsMutex.Lock()
+		for accountID, conn := range es.connections {
+			conn.close()
+			delete(es.connections, accountID)
+		}
+		es.connectionsMutex.Unlock()
+		
+		es.logger.Info("邮件监控服务已停止")
+	})
 }
 
 // emailChecker 邮件检查器
 func (es *EmailService) emailChecker() {
+	defer es.wg.Done()
+	
 	ticker := time.NewTicker(es.checkInterval)
 	defer ticker.Stop()
 	
 	for {
 		select {
 		case <-es.ctx.Done():
+			es.logger.Info("邮件检查器收到关闭信号")
 			return
 		case <-ticker.C:
+			// 检查是否正在关闭
+			es.shutdownMutex.RLock()
+			if es.isShuttingDown {
+				es.shutdownMutex.RUnlock()
+				return
+			}
+			es.shutdownMutex.RUnlock()
+			
 			es.checkAllAccounts()
 		}
 	}
@@ -133,14 +190,25 @@ func (es *EmailService) emailChecker() {
 
 // connectionCleaner 连接清理器，清理长时间未使用的连接
 func (es *EmailService) connectionCleaner() {
+	defer es.wg.Done()
+	
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	
 	for {
 		select {
 		case <-es.ctx.Done():
+			es.logger.Info("连接清理器收到关闭信号")
 			return
 		case <-ticker.C:
+			// 检查是否正在关闭
+			es.shutdownMutex.RLock()
+			if es.isShuttingDown {
+				es.shutdownMutex.RUnlock()
+				return
+			}
+			es.shutdownMutex.RUnlock()
+			
 			es.cleanupIdleConnections()
 		}
 	}
@@ -152,12 +220,23 @@ func (es *EmailService) cleanupIdleConnections() {
 	defer es.connectionsMutex.Unlock()
 	
 	cutoff := time.Now().Add(-30 * time.Minute) // 30分钟未使用则清理
+	var toDelete []uint
 	
 	for accountID, conn := range es.connections {
-		if conn.LastUsed.Before(cutoff) {
+		if conn.LastUsed.Before(cutoff) || !conn.isAlive() {
 			conn.close()
-			delete(es.connections, accountID)
+			toDelete = append(toDelete, accountID)
 		}
+	}
+	
+	// 删除已关闭的连接
+	for _, accountID := range toDelete {
+		delete(es.connections, accountID)
+		es.logger.Debugf("清理了账户 %d 的空闲连接", accountID)
+	}
+	
+	if len(toDelete) > 0 {
+		es.logger.Infof("清理了 %d 个空闲连接", len(toDelete))
 	}
 }
 
@@ -165,11 +244,44 @@ func (es *EmailService) cleanupIdleConnections() {
 func (es *EmailService) checkAllAccounts() {
 	accounts, err := es.getActiveAccounts()
 	if err != nil {
+		es.logger.Errorf("获取活跃账户失败: %v", err)
 		return
 	}
 	
+	es.logger.Debugf("开始检查 %d 个活跃邮箱账户", len(accounts))
+	
+	// 使用WaitGroup等待所有检查完成
+	var checkWg sync.WaitGroup
 	for _, account := range accounts {
-		go es.checkAccount(&account)
+		// 检查是否正在关闭
+		es.shutdownMutex.RLock()
+		if es.isShuttingDown {
+			es.shutdownMutex.RUnlock()
+			break
+		}
+		es.shutdownMutex.RUnlock()
+		
+		checkWg.Add(1)
+		go func(acc models.EmailAccount) {
+			defer checkWg.Done()
+			es.checkAccount(&acc)
+		}(account)
+	}
+	
+	// 等待所有检查完成或超时
+	done := make(chan struct{})
+	go func() {
+		checkWg.Wait()
+		close(done)
+	}()
+	
+	select {
+	case <-done:
+		es.logger.Debug("所有邮箱账户检查完成")
+	case <-time.After(5 * time.Minute):
+		es.logger.Warn("邮箱账户检查超时")
+	case <-es.ctx.Done():
+		es.logger.Info("邮箱检查被中断")
 	}
 }
 
@@ -390,38 +502,53 @@ func (conn *IMAPConnection) searchUnreadMessages() ([]*imap.Message, error) {
 		return nil, fmt.Errorf("连接已断开")
 	}
 	
-	// 多种搜索策略，兼容不同邮件服务器
-	var uids []uint32
-	var err error
-	
-	// 策略1: 搜索未读邮件（标准方式）
-	criteria := imap.NewSearchCriteria()
-	criteria.WithoutFlags = []string{"\\Seen"}
-	
-	uids, err = conn.Client.Search(criteria)
+	// 使用统一的搜索策略
+	uids, err := conn.searchWithFallback()
 	if err != nil {
-		// 策略2: 如果标准方式失败，尝试使用UNSEEN标志
-		criteria = imap.NewSearchCriteria()
-		criteria.WithFlags = []string{"\\Recent"}
-		uids, err = conn.Client.Search(criteria)
-		
-		if err != nil {
-			// 策略3: 搜索最近的邮件（最后的备选方案）
-			criteria = imap.NewSearchCriteria()
-			since := time.Now().AddDate(0, 0, -7) // 最近7天
-			criteria.Since = since
-			uids, err = conn.Client.Search(criteria)
-			
-			if err != nil {
-				return nil, fmt.Errorf("所有搜索策略均失败: %v", err)
-			}
-		}
+		return nil, err
 	}
 	
 	if len(uids) == 0 {
 		return nil, nil
 	}
 	
+	// 获取邮件详情并过滤未读邮件
+	return conn.fetchAndFilterMessages(uids)
+}
+
+// searchWithFallback 统一的搜索策略（重用逻辑）
+func (conn *IMAPConnection) searchWithFallback() ([]uint32, error) {
+	// 策略1: 搜索未读邮件（标准方式）
+	criteria := imap.NewSearchCriteria()
+	criteria.WithoutFlags = []string{"\\Seen"}
+	
+	uids, err := conn.Client.Search(criteria)
+	if err == nil && len(uids) > 0 {
+		return uids, nil
+	}
+	
+	// 策略2: 使用UNSEEN标志
+	criteria = imap.NewSearchCriteria()
+	criteria.WithFlags = []string{"\\Recent"}
+	uids, err = conn.Client.Search(criteria)
+	if err == nil && len(uids) > 0 {
+		return uids, nil
+	}
+	
+	// 策略3: 搜索最近的邮件（最后的备选方案）
+	criteria = imap.NewSearchCriteria()
+	since := time.Now().AddDate(0, 0, -7) // 最近7天
+	criteria.Since = since
+	uids, err = conn.Client.Search(criteria)
+	if err != nil {
+		return nil, fmt.Errorf("所有搜索策略均失败: %v", err)
+	}
+	
+	return uids, nil
+}
+
+// fetchAndFilterMessages 获取邮件详情并过滤（重用逻辑）
+func (conn *IMAPConnection) fetchAndFilterMessages(uids []uint32) ([]*imap.Message, error) {
 	// 限制批量获取的邮件数量，避免超时
 	maxMessages := 50
 	if len(uids) > maxMessages {
@@ -437,14 +564,23 @@ func (conn *IMAPConnection) searchUnreadMessages() ([]*imap.Message, error) {
 	
 	go func() {
 		done <- conn.Client.Fetch(seqset, []imap.FetchItem{
+			imap.FetchUid,          // 关键修复：确保获取UID
 			imap.FetchEnvelope, 
 			imap.FetchBodyStructure,
 			imap.FetchFlags,
+			"BODY[TEXT]", // 获取邮件正文内容
+			"BODY[1]",    // 获取第一个body部分
 		}, messages)
 	}()
 	
 	var msgs []*imap.Message
 	for msg := range messages {
+		// 验证UID是否正确获取
+		if msg.Uid == 0 {
+			// UID为0说明获取失败，记录警告但继续处理
+			continue
+		}
+		
 		// 验证邮件确实是未读的
 		if conn.isMessageUnread(msg) {
 			msgs = append(msgs, msg)
@@ -473,13 +609,24 @@ func (conn *IMAPConnection) isMessageUnread(msg *imap.Message) bool {
 }
 
 func (conn *IMAPConnection) isAlive() bool {
-	if !conn.IsConnected {
+	conn.Mutex.Lock()
+	defer conn.Mutex.Unlock()
+	
+	if !conn.IsConnected || conn.Client == nil {
 		return false
 	}
 	
-	// 使用超时检测连接状态
+	// 使用带超时的上下文检测连接状态
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("NOOP操作panic: %v", r)
+			}
+		}()
 		done <- conn.Client.Noop()
 	}()
 	
@@ -490,7 +637,7 @@ func (conn *IMAPConnection) isAlive() bool {
 			return false
 		}
 		return true
-	case <-time.After(10 * time.Second):
+	case <-ctx.Done():
 		// 超时认为连接失效
 		conn.IsConnected = false
 		return false
@@ -498,17 +645,27 @@ func (conn *IMAPConnection) isAlive() bool {
 }
 
 func (conn *IMAPConnection) close() {
-	conn.Mutex.Lock()
-	defer conn.Mutex.Unlock()
-	
-	if conn.IsConnected {
-		conn.Client.Close()
-		conn.IsConnected = false
-	}
-	
-	if conn.cancel != nil {
-		conn.cancel()
-	}
+	conn.closeOnce.Do(func() {
+		conn.Mutex.Lock()
+		defer conn.Mutex.Unlock()
+		
+		if conn.IsConnected && conn.Client != nil {
+			// 设置较短的超时来关闭连接
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// 忽略关闭时的panic
+					}
+				}()
+				conn.Client.Close()
+			}()
+			conn.IsConnected = false
+		}
+		
+		if conn.cancel != nil {
+			conn.cancel()
+		}
+	})
 }
 
 // processMessage 处理邮件消息
@@ -607,7 +764,7 @@ type PDFSource struct {
 	LocalPath string
 }
 
-// analyzePDFSources 分析PDF源（附件和链接）
+// analyzePDFSources 分析PDF源（附件和链接）- 业界最佳实践版本
 func (es *EmailService) analyzePDFSources(account *models.EmailAccount, msg *imap.Message) []PDFSource {
 	var sources []PDFSource
 	
@@ -634,25 +791,212 @@ func (es *EmailService) analyzePDFSources(account *models.EmailAccount, msg *ima
 		}
 	}
 	
-	// 分析邮件内容中的PDF链接
-	if msg.Envelope != nil {
-		pdfLinks := es.extractPDFLinks(msg.Envelope.Subject)
-		for _, link := range pdfLinks {
-			fileName := utils.ExtractFilenameFromURL(link)
-			fileName = utils.CleanFilename(fileName)
-			localPath := filepath.Join(config.DownloadPath, fileName)
-			
-			sources = append(sources, PDFSource{
-				Type:      models.TypeLink,
-				Source:    link,
-				FileName:  fileName,
-				FileSize:  0, // 链接大小未知
-				LocalPath: localPath,
-			})
+	// 分析邮件内容中的PDF链接（完整内容解析）
+	pdfLinks := es.extractPDFLinksFromMessage(msg)
+	for _, link := range pdfLinks {
+		fileName := utils.ExtractFilenameFromURL(link)
+		if fileName == "" {
+			// 如果无法从URL提取文件名，使用默认命名
+			fileName = fmt.Sprintf("download_%d.pdf", time.Now().Unix())
 		}
+		fileName = utils.CleanFilename(fileName)
+		localPath := filepath.Join(config.DownloadPath, fileName)
+		
+		sources = append(sources, PDFSource{
+			Type:      models.TypeLink,
+			Source:    link,
+			FileName:  fileName,
+			FileSize:  0, // 链接大小未知
+			LocalPath: localPath,
+		})
 	}
 	
 	return sources
+}
+
+// extractPDFLinksFromMessage 从邮件消息中提取PDF链接（完整解析）
+func (es *EmailService) extractPDFLinksFromMessage(msg *imap.Message) []string {
+	var allLinks []string
+	
+	// 1. 从主题中提取链接
+	if msg.Envelope != nil && msg.Envelope.Subject != "" {
+		subjectLinks := es.extractPDFLinks(msg.Envelope.Subject)
+		allLinks = append(allLinks, subjectLinks...)
+	}
+	
+	// 2. 从邮件正文中提取链接
+	bodyLinks := es.extractPDFLinksFromBody(msg)
+	allLinks = append(allLinks, bodyLinks...)
+	
+	// 去重
+	linkMap := make(map[string]bool)
+	var uniqueLinks []string
+	for _, link := range allLinks {
+		if !linkMap[link] {
+			linkMap[link] = true
+			uniqueLinks = append(uniqueLinks, link)
+		}
+	}
+	
+	return uniqueLinks
+}
+
+// extractPDFLinksFromBody 从邮件正文中提取PDF链接
+func (es *EmailService) extractPDFLinksFromBody(msg *imap.Message) []string {
+	var links []string
+	
+	if msg.Body == nil {
+		es.logger.Debug("邮件Body为空，无法提取链接")
+		return links
+	}
+	
+	es.logger.Debugf("开始从邮件正文提取PDF链接，Body部分数量: %d", len(msg.Body))
+	
+	// 遍历所有Body部分
+	for i, body := range msg.Body {
+		if body == nil {
+			es.logger.Debugf("Body部分 %d 为空", i)
+			continue
+		}
+		
+		// 读取正文内容
+		content, err := io.ReadAll(body)
+		if err != nil {
+			es.logger.Debugf("读取Body部分 %d 失败: %v", i, err)
+			continue
+		}
+		
+		es.logger.Debugf("Body部分 %d 内容长度: %d 字节", i, len(content))
+		
+		// 尝试不同的编码解析
+		textContent := es.decodeBodyContent(content)
+		
+		// 记录解码后的内容（仅前500字符用于调试）
+		if len(textContent) > 0 {
+			preview := textContent
+			if len(preview) > 500 {
+				preview = preview[:500] + "..."
+			}
+			es.logger.Debugf("Body部分 %d 解码后内容预览: %s", i, preview)
+		}
+		
+		// 从文本内容中提取PDF链接
+		bodyLinks := es.extractPDFLinks(textContent)
+		if len(bodyLinks) > 0 {
+			es.logger.Infof("从Body部分 %d 提取到PDF链接: %v", i, bodyLinks)
+		}
+		links = append(links, bodyLinks...)
+		
+		// 特殊处理：查找QQ邮箱等服务商的下载链接
+		specialLinks := es.extractSpecialDownloadLinks(textContent)
+		if len(specialLinks) > 0 {
+			es.logger.Infof("从Body部分 %d 提取到特殊下载链接: %v", i, specialLinks)
+		}
+		links = append(links, specialLinks...)
+	}
+	
+	es.logger.Infof("总共从邮件正文提取到 %d 个链接", len(links))
+	return links
+}
+
+// decodeBodyContent 解码邮件正文内容
+func (es *EmailService) decodeBodyContent(content []byte) string {
+	// 尝试多种编码方式
+	encodings := []string{"utf-8", "gbk", "gb2312", "iso-8859-1"}
+	
+	for _, encoding := range encodings {
+		if decoded := utils.DecodeText(content, encoding); decoded != "" {
+			return decoded
+		}
+	}
+	
+	// 如果都失败，返回原始字符串
+	return string(content)
+}
+
+// extractSpecialDownloadLinks 提取特殊的下载链接（如QQ邮箱、网易邮箱等）
+func (es *EmailService) extractSpecialDownloadLinks(text string) []string {
+	var links []string
+	
+	// 定义各种邮件服务商的下载链接模式
+	patterns := []string{
+		// QQ邮箱下载链接
+		`https?://[^/]*\.mail\.qq\.com/[^\s"'<>]+`,
+		`https?://[^/]*dfsdown\.mail\.ftn\.qq\.com/[^\s"'<>]+`,
+		
+		// 网易邮箱下载链接
+		`https?://[^/]*\.mail\.163\.com/[^\s"'<>]+`,
+		`https?://[^/]*\.mail\.126\.com/[^\s"'<>]+`,
+		
+		// Gmail下载链接
+		`https?://mail\.google\.com/mail/[^\s"'<>]+`,
+		
+		// Outlook下载链接
+		`https?://[^/]*\.outlook\.com/[^\s"'<>]+`,
+		
+		// 通用下载链接（包含download、attachment等关键词）
+		`https?://[^\s"'<>]*(?:download|attachment|file)[^\s"'<>]*`,
+		
+		// 通用PDF直链
+		`https?://[^\s"'<>]+\.pdf(?:\?[^\s"'<>]*)?`,
+	}
+	
+	for _, pattern := range patterns {
+		regex, err := regexp.Compile(pattern)
+		if err != nil {
+			continue
+		}
+		
+		matches := regex.FindAllString(text, -1)
+		for _, match := range matches {
+			// 验证URL格式
+			if _, err := url.Parse(match); err == nil {
+				// 进一步验证是否可能是PDF相关链接
+				if es.isPotentialPDFLink(match) {
+					links = append(links, match)
+				}
+			}
+		}
+	}
+	
+	return links
+}
+
+// isPotentialPDFLink 判断是否是潜在的PDF链接
+func (es *EmailService) isPotentialPDFLink(link string) bool {
+	linkLower := strings.ToLower(link)
+	
+	// 直接包含.pdf的链接
+	if strings.Contains(linkLower, ".pdf") {
+		return true
+	}
+	
+	// 包含下载相关关键词的链接
+	downloadKeywords := []string{
+		"download", "attachment", "file", "doc", "document",
+		"dfsdown", "mailattach", "attach", "getfile",
+	}
+	
+	for _, keyword := range downloadKeywords {
+		if strings.Contains(linkLower, keyword) {
+			return true
+		}
+	}
+	
+	// 邮件服务商的特殊域名
+	mailDomains := []string{
+		"mail.qq.com", "mail.163.com", "mail.126.com",
+		"mail.google.com", "outlook.com", "hotmail.com",
+		"ftn.qq.com", "dfsdown",
+	}
+	
+	for _, domain := range mailDomains {
+		if strings.Contains(linkLower, domain) {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // AttachmentInfo 附件信息
@@ -661,46 +1005,91 @@ type AttachmentInfo struct {
 	Size     int64
 }
 
-// findPDFAttachments 查找PDF附件
+// findPDFAttachments 查找PDF附件（使用统一的逻辑）
 func (es *EmailService) findPDFAttachments(bodyStructure *imap.BodyStructure) []AttachmentInfo {
 	var attachments []AttachmentInfo
 	
-	var searchParts func(*imap.BodyStructure)
-	searchParts = func(bs *imap.BodyStructure) {
-		// 检查当前部分是否为PDF附件
-		if strings.ToLower(bs.MIMEType) == "application" && 
-		   strings.ToLower(bs.MIMESubType) == "pdf" {
-			
-			// 获取文件名
-			fileName := ""
-			// 修复：检查Disposition是否为attachment类型
-			if bs.Disposition == "attachment" && bs.Params != nil {
-				if name, exists := bs.Params["filename"]; exists {
-					fileName = name
-				}
-			}
-			if fileName == "" && bs.Params != nil {
-				if name, exists := bs.Params["name"]; exists {
-					fileName = name
-				}
-			}
-			
-			if fileName != "" {
-				attachments = append(attachments, AttachmentInfo{
-					FileName: fileName,
-					Size:     int64(bs.Size),
-				})
-			}
+	// 使用统一的PDF搜索逻辑
+	es.searchPDFPartsRecursively(bodyStructure, func(fileName string, size int64) {
+		if fileName != "" {
+			attachments = append(attachments, AttachmentInfo{
+				FileName: fileName,
+				Size:     size,
+			})
 		}
-		
-		// 递归搜索子部分
-		for _, part := range bs.Parts {
-			searchParts(part)
+	}, 0)
+	
+	return attachments
+}
+
+// searchPDFPartsRecursively 递归搜索PDF部分（统一逻辑，避免重复代码）
+func (es *EmailService) searchPDFPartsRecursively(bs *imap.BodyStructure, callback func(string, int64), depth int) {
+	// 防止无限递归
+	if depth > 10 || bs == nil {
+		return
+	}
+	
+	// 检查当前部分是否为PDF附件（与下载服务保持一致的逻辑）
+	mimeType := strings.ToLower(bs.MIMEType)
+	mimeSubType := strings.ToLower(bs.MIMESubType)
+	
+	isPDF := (mimeType == "application" && mimeSubType == "pdf") ||
+			 (mimeType == "application" && mimeSubType == "octet-stream") ||
+			 (mimeType == "application" && mimeSubType == "binary")
+	
+	// 如果MIME类型不明确，检查文件名
+	if !isPDF {
+		fileName := es.extractFileNameFromBodyStructure(bs)
+		if fileName != "" && strings.HasSuffix(strings.ToLower(fileName), ".pdf") {
+			isPDF = true
 		}
 	}
 	
-	searchParts(bodyStructure)
-	return attachments
+	if isPDF {
+		fileName := es.extractFileNameFromBodyStructure(bs)
+		es.logger.Infof("邮件服务发现PDF附件 - 文件名: '%s', MIME: %s/%s, 大小: %d", 
+			fileName, bs.MIMEType, bs.MIMESubType, bs.Size)
+		callback(fileName, int64(bs.Size))
+	}
+	
+	// 递归搜索子部分
+	for i, part := range bs.Parts {
+		if i > 20 { // 限制搜索数量
+			break
+		}
+		es.searchPDFPartsRecursively(part, callback, depth+1)
+	}
+}
+
+// extractFileNameFromBodyStructure 从BodyStructure提取文件名（统一逻辑）
+func (es *EmailService) extractFileNameFromBodyStructure(bs *imap.BodyStructure) string {
+	if bs == nil {
+		return ""
+	}
+	
+	var fileName string
+	
+	// 优先从Content-Disposition参数获取
+	if bs.DispositionParams != nil {
+		if filename, exists := bs.DispositionParams["filename"]; exists {
+			fileName = utils.DecodeMimeHeader(filename)
+			if fileName != "" {
+				return fileName
+			}
+		}
+	}
+	
+	// 从Content-Type参数获取
+	if bs.Params != nil {
+		if name, exists := bs.Params["name"]; exists {
+			fileName = utils.DecodeMimeHeader(name)
+			if fileName != "" {
+				return fileName
+			}
+		}
+	}
+	
+	return ""
 }
 
 // extractPDFLinks 从文本中提取PDF链接
@@ -766,10 +1155,7 @@ func (es *EmailService) getDownloadConfig() (*models.AppConfig, error) {
 	return &config, nil
 }
 
-// SetCheckInterval 设置检查间隔
-func (es *EmailService) SetCheckInterval(interval time.Duration) {
-	es.checkInterval = interval
-}
+
 
 // CheckAccountNow 立即检查指定账户
 func (es *EmailService) CheckAccountNow(accountID uint) error {

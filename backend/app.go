@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"emaild/backend/database"
@@ -28,15 +29,27 @@ type EmailCheckResult struct {
 // App 主应用结构体
 type App struct {
 	ctx             context.Context
-	logger          *logrus.Logger
+	cancel          context.CancelFunc
 	db              *database.Database
-	emailService    *services.EmailService
 	downloadService *services.DownloadService
+	emailService    *services.EmailService
 	trayService     *services.TrayService
+	logger          *logrus.Logger
+	
+	// 服务状态
+	isInitialized   bool
+	initMutex       sync.RWMutex
+	
+	// 优雅关闭相关
+	shutdownOnce    sync.Once
+	isShuttingDown  bool
+	shutdownMutex   sync.RWMutex
 }
 
 // NewApp 创建应用实例
 func NewApp() *App {
+	ctx, cancel := context.WithCancel(context.Background())
+	
 	// 初始化日志
 	logger := logrus.New()
 	logger.SetLevel(logrus.InfoLevel)
@@ -46,60 +59,26 @@ func NewApp() *App {
 	})
 
 	return &App{
-		logger: logger,
+		ctx:            ctx,
+		cancel:         cancel,
+		logger:         logger,
+		isInitialized:  false,
+		isShuttingDown: false,
 	}
 }
 
 // OnStartup 应用启动时的回调
 func (a *App) OnStartup(ctx context.Context) {
 	a.ctx = ctx
-	a.logger.Info("应用启动中...")
-
-	// 初始化数据库
-	db, err := database.NewDatabase()
-	if err != nil {
-		a.logger.Errorf("数据库初始化失败: %v", err)
-		// 显示错误对话框给用户
-		runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
-			Type:    runtime.ErrorDialog,
-			Title:   "数据库初始化失败",
-			Message: fmt.Sprintf("无法初始化数据库，请检查文件权限和磁盘空间。\n错误信息: %v", err),
-		})
-		return
-	}
-	a.db = db
-
-	// 初始化服务（按正确的依赖顺序）
-	a.downloadService = services.NewDownloadService(a.db)
-	a.emailService = services.NewEmailService(a.db, a.downloadService, a.logger)
-	a.trayService = services.NewTrayService(a.logger, a)
-
-	// 获取配置并启动服务
-	config, err := a.getOrCreateDefaultConfig()
-	if err != nil {
-		a.logger.Errorf("获取配置失败: %v", err)
-		return
-	}
-
-	// 设置下载服务的最大并发数
-	a.downloadService.SetMaxConcurrent(config.MaxConcurrent)
-
-	// 启动系统托盘（如果启用）
-	if config.MinimizeToTray {
-		if err := a.trayService.Start(); err != nil {
-			a.logger.Errorf("启动系统托盘失败: %v", err)
+	
+	// 异步初始化服务，避免阻塞启动
+	go func() {
+		if err := a.initializeServices(); err != nil {
+			a.logger.Errorf("服务初始化失败: %v", err)
+			// 显示用户友好的错误对话框
+			a.showErrorDialog("服务初始化失败", fmt.Sprintf("无法启动应用服务: %v", err))
 		}
-	}
-
-	// 如果启用自动检查，启动邮件监控
-	if config.AutoCheck {
-		a.emailService.SetCheckInterval(time.Duration(config.CheckInterval) * time.Second)
-		if err := a.emailService.Start(); err != nil {
-			a.logger.Errorf("启动邮件监控失败: %v", err)
-		}
-	}
-
-	a.logger.Info("应用启动完成")
+	}()
 }
 
 // OnShutdown 应用关闭时的回调
@@ -173,6 +152,10 @@ func (a *App) getOrCreateDefaultConfig() (*models.AppConfig, error) {
 
 // GetEmailAccounts 获取所有邮箱账户
 func (a *App) GetEmailAccounts() ([]models.EmailAccount, error) {
+	if err := a.ensureServicesReady(); err != nil {
+		return nil, err
+	}
+	
 	return a.db.GetEmailAccounts()
 }
 
@@ -189,7 +172,21 @@ func (a *App) CreateEmailAccount(account models.EmailAccount) error {
 	}
 
 	// 保存邮箱账户
-	return a.db.CreateEmailAccount(&account)
+	if err := a.db.CreateEmailAccount(&account); err != nil {
+		return err
+	}
+
+	// 如果账户是激活状态，立即触发一次邮件检查
+	if account.IsActive && a.emailService != nil {
+		go func() {
+			// 等待一秒钟确保数据库操作完成
+			time.Sleep(1 * time.Second)
+			// 检查新添加的账户
+			a.emailService.CheckAccountWithResult(&account)
+		}()
+	}
+
+	return nil
 }
 
 // UpdateEmailAccount 更新邮箱账户
@@ -225,14 +222,23 @@ func (a *App) TestEmailConnection(account models.EmailAccount) error {
 	return a.emailService.TestConnection(&account)
 }
 
+// TestEmailConnectionByID 根据ID测试邮箱连接
+func (a *App) TestEmailConnectionByID(accountID uint) error {
+	account, err := a.db.GetEmailAccountByID(accountID)
+	if err != nil {
+		return fmt.Errorf("获取账户信息失败: %v", err)
+	}
+	return a.emailService.TestConnection(account)
+}
+
 // ====================
 // 邮件检查 API
 // ====================
 
 // CheckAllEmails 检查所有邮箱
 func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
-	if a.emailService == nil {
-		return nil, fmt.Errorf("邮件服务未初始化")
+	if err := a.ensureServicesReady(); err != nil {
+		return nil, err
 	}
 
 	accounts, err := a.db.GetEmailAccounts()
@@ -265,20 +271,19 @@ func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
 
 // CheckSingleEmail 检查单个邮箱
 func (a *App) CheckSingleEmail(accountID uint) (EmailCheckResult, error) {
+	if err := a.ensureServicesReady(); err != nil {
+		return EmailCheckResult{
+			Error:   err.Error(),
+			Success: false,
+		}, err
+	}
+	
 	account, err := a.db.GetEmailAccountByID(accountID)
 	if err != nil {
 		return EmailCheckResult{
 			Error:   fmt.Sprintf("获取邮箱账户失败: %v", err),
 			Success: false,
 		}, err
-	}
-
-	if a.emailService == nil {
-		return EmailCheckResult{
-			Account: account,
-			Error:   "邮件服务未初始化",
-			Success: false,
-		}, fmt.Errorf("邮件服务未初始化")
 	}
 
 	// 调用实际的邮件检查逻辑
@@ -600,4 +605,205 @@ func (a *App) GetServiceStatus() map[string]bool {
 func (a *App) GetEmailMessages(page, pageSize int) ([]models.EmailMessage, error) {
 	offset := (page - 1) * pageSize
 	return a.emailService.GetEmailMessages(pageSize, offset)
+}
+
+// initializeServices 初始化所有服务
+func (a *App) initializeServices() error {
+	a.initMutex.Lock()
+	defer a.initMutex.Unlock()
+	
+	if a.isInitialized {
+		return nil
+	}
+	
+	a.logger.Info("开始初始化应用服务")
+	
+	// 初始化数据库
+	db, err := database.NewDatabase()
+	if err != nil {
+		return fmt.Errorf("初始化数据库失败: %v", err)
+	}
+	a.db = db
+	a.logger.Info("数据库初始化完成")
+	
+	// 初始化下载服务
+	a.downloadService = services.NewDownloadService(db)
+	a.logger.Info("下载服务初始化完成")
+	
+	// 初始化邮件服务
+	a.emailService = services.NewEmailService(db, a.downloadService, a.logger)
+	a.logger.Info("邮件服务初始化完成")
+	
+	// 初始化托盘服务
+	a.trayService = services.NewTrayService(db, a.logger)
+	a.logger.Info("托盘服务初始化完成")
+	
+	// 设置托盘回调
+	a.setupTrayCallbacks()
+	
+	// 启动托盘服务
+	if err := a.trayService.Start(); err != nil {
+		a.logger.Errorf("启动托盘服务失败: %v", err)
+		// 托盘服务失败不应该阻止应用启动
+	}
+	
+	a.isInitialized = true
+	a.logger.Info("所有服务初始化完成")
+	
+	return nil
+}
+
+// setupTrayCallbacks 设置托盘回调函数
+func (a *App) setupTrayCallbacks() {
+	a.trayService.SetCallbacks(
+		func() { // onShow
+			a.logger.Info("显示主窗口")
+			// Wails会自动处理窗口显示
+		},
+		func() { // onHide
+			a.logger.Info("隐藏主窗口")
+			// Wails会自动处理窗口隐藏
+		},
+		func() { // onCheck
+			a.logger.Info("用户触发邮件检查")
+			go func() {
+				if _, err := a.CheckAllEmails(); err != nil {
+					a.logger.Errorf("手动邮件检查失败: %v", err)
+				}
+			}()
+		},
+		func() { // onSettings
+			a.logger.Info("打开设置页面")
+			// 前端会处理页面跳转
+		},
+		func() { // onQuit
+			a.logger.Info("用户请求退出应用")
+			a.shutdown()
+		},
+	)
+}
+
+// shutdown 优雅关闭应用
+func (a *App) shutdown() {
+	a.shutdownOnce.Do(func() {
+		a.logger.Info("开始关闭应用")
+		
+		// 设置关闭状态
+		a.shutdownMutex.Lock()
+		a.isShuttingDown = true
+		a.shutdownMutex.Unlock()
+		
+		// 停止所有服务
+		var wg sync.WaitGroup
+		
+		// 停止邮件服务
+		if a.emailService != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				a.emailService.StopEmailMonitoring()
+				a.logger.Info("邮件服务已停止")
+			}()
+		}
+		
+		// 停止下载服务
+		if a.downloadService != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				a.downloadService.Stop()
+				a.logger.Info("下载服务已停止")
+			}()
+		}
+		
+		// 停止托盘服务
+		if a.trayService != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				a.trayService.Stop()
+				a.logger.Info("托盘服务已停止")
+			}()
+		}
+		
+		// 等待所有服务停止（带超时）
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		
+		select {
+		case <-done:
+			a.logger.Info("所有服务已正常停止")
+		case <-time.After(30 * time.Second):
+			a.logger.Warn("等待服务停止超时，强制退出")
+		}
+		
+		// 关闭数据库连接
+		if a.db != nil && a.db.DB != nil {
+			if err := a.db.DB.Close(); err != nil {
+				a.logger.Errorf("关闭数据库连接失败: %v", err)
+			} else {
+				a.logger.Info("数据库连接已关闭")
+			}
+		}
+		
+		// 取消上下文
+		a.cancel()
+		
+		a.logger.Info("应用关闭完成")
+	})
+}
+
+// showErrorDialog 显示错误对话框
+func (a *App) showErrorDialog(title, message string) {
+	// 这里应该调用Wails的对话框API，但为了保持兼容性，先记录日志
+	a.logger.Errorf("错误对话框 - %s: %s", title, message)
+	// TODO: 集成Wails对话框API
+}
+
+// 检查服务是否正在关闭的辅助方法
+func (a *App) isServiceShuttingDown() bool {
+	a.shutdownMutex.RLock()
+	defer a.shutdownMutex.RUnlock()
+	return a.isShuttingDown
+}
+
+// 等待服务初始化完成的辅助方法
+func (a *App) waitForInitialization() error {
+	// 最多等待30秒
+	timeout := time.After(30 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf("等待服务初始化超时")
+		case <-ticker.C:
+			a.initMutex.RLock()
+			initialized := a.isInitialized
+			a.initMutex.RUnlock()
+			
+			if initialized {
+				return nil
+			}
+		case <-a.ctx.Done():
+			return fmt.Errorf("应用正在关闭")
+		}
+	}
+}
+
+// ensureServicesReady 确保服务已准备就绪的统一检查方法
+func (a *App) ensureServicesReady() error {
+	if err := a.waitForInitialization(); err != nil {
+		return err
+	}
+	
+	if a.isServiceShuttingDown() {
+		return fmt.Errorf("服务正在关闭")
+	}
+	
+	return nil
 } 

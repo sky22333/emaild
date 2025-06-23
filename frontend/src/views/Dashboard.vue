@@ -4,7 +4,7 @@
       <n-card title="📊 仪表板">
         <n-space vertical>
           <!-- 错误提示 -->
-          <n-alert v-if="error" type="error" :title="error.message" closable @close="clearError" />
+          <n-alert v-if="error" type="error" :title="error" closable @close="clearError" />
           
           <!-- 欢迎信息 -->
           <n-alert type="success" title="欢迎使用">
@@ -151,7 +151,6 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
-import { useErrorHandler } from '../composables/useErrorHandler'
 import { 
   NCard, 
   NStatistic, 
@@ -169,40 +168,27 @@ import {
   NTime,
   NEmpty
 } from 'naive-ui'
-import type { DownloadTask } from '../composables/useApi'
 
 const router = useRouter()
 const appStore = useAppStore()
-const { withErrorHandling, isLoading, error, clearError } = useErrorHandler()
 
-// 响应式数据
-const stats = ref({
-  totalAccounts: 0,
-  activeAccounts: 0,
-  totalTasks: 0,
-  completedTasks: 0,
-  runningTasks: 0,
-  failedTasks: 0
-})
+// 本地加载状态
+const isLoading = ref(false)
+const error = ref<string | null>(null)
 
-// 计算属性
+// 计算属性 - 直接使用Store中的数据
+const stats = computed(() => ({
+  totalAccounts: appStore.emailAccounts.length,
+  activeAccounts: appStore.activeEmailAccounts.length,
+  totalTasks: appStore.downloadTasks.length,
+  completedTasks: appStore.completedTasks.length,
+  runningTasks: appStore.runningTasks.length,
+  failedTasks: appStore.failedTasks.length
+}))
+
 const completionRate = computed(() => {
   if (stats.value.totalTasks === 0) return 0
   return Math.round((stats.value.completedTasks / stats.value.totalTasks) * 100)
-})
-
-const dashboardStats = computed(() => {
-  const accounts = appStore.emailAccounts || []
-  const tasks = appStore.downloadTasks || []
-  
-  return {
-    totalAccounts: accounts.length,
-    activeAccounts: accounts.filter(a => a.is_active).length,
-    totalTasks: tasks.length,
-    runningTasks: tasks.filter(t => t.status === 'downloading').length,
-    completedTasks: tasks.filter(t => t.status === 'completed').length,
-    failedTasks: tasks.filter(t => t.status === 'failed').length
-  }
 })
 
 const recentTasks = computed(() => {
@@ -213,67 +199,53 @@ const recentTasks = computed(() => {
     .slice(0, 5)
 })
 
-const chartData = computed(() => {
-  const tasks = appStore.downloadTasks || []
-  const last7Days = []
-  const now = new Date()
-  
-  for (let i = 6; i >= 0; i--) {
-    const date = new Date(now)
-    date.setDate(date.getDate() - i)
-    const dateStr = date.toISOString().split('T')[0]
-    
-    const dayTasks = tasks.filter(task => {
-      const taskDate = new Date(task.created_at || 0).toISOString().split('T')[0]
-      return taskDate === dateStr
-    })
-    
-    last7Days.push({
-      date: dateStr,
-      completed: dayTasks.filter(t => t.status === 'completed').length,
-      failed: dayTasks.filter(t => t.status === 'failed').length
-    })
-  }
-  
-  return last7Days
-})
-
-// 方法
+// 简化的数据加载方法
 const loadDashboardData = async () => {
-  await withErrorHandling(async () => {
+  if (isLoading.value) return
+  
+  try {
+    isLoading.value = true
+    error.value = null
+    
     // 并行加载数据
-    await Promise.all([
+    await Promise.allSettled([
       appStore.loadEmailAccounts(),
       appStore.loadDownloadTasks(1, 10),
       appStore.checkServiceStatus()
     ])
-    
-    // 更新统计数据
-    stats.value = {
-      totalAccounts: appStore.emailAccounts.length,
-      activeAccounts: appStore.activeEmailAccounts.length,
-      totalTasks: appStore.downloadTasks.length,
-      completedTasks: appStore.completedTasks.length,
-      runningTasks: appStore.runningTasks.length,
-      failedTasks: appStore.failedTasks.length
-    }
-    
-    // 获取最近的任务
-    recentTasks.value = appStore.downloadTasks.slice(0, 5)
-  }, '加载仪表板数据')
+  } catch (err) {
+    console.error('加载仪表板数据失败:', err)
+    error.value = '加载数据失败，请稍后重试'
+  } finally {
+    isLoading.value = false
+  }
 }
 
 const checkAllEmails = async () => {
-  await withErrorHandling(async () => {
+  if (isLoading.value) return
+  
+  try {
+    isLoading.value = true
     await appStore.checkAllEmails()
     await loadDashboardData()
-  }, '检查邮件')
+  } catch (err) {
+    console.error('检查邮件失败:', err)
+    error.value = '检查邮件失败'
+  } finally {
+    isLoading.value = false
+  }
 }
 
 const openDownloadFolder = async () => {
-  await withErrorHandling(async () => {
+  try {
     await appStore.openDownloadFolder()
-  }, '打开下载文件夹')
+  } catch (err) {
+    console.error('打开下载文件夹失败:', err)
+  }
+}
+
+const clearError = () => {
+  error.value = null
 }
 
 const viewDownloads = () => {

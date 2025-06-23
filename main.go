@@ -13,6 +13,9 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+//go:embed assets/icon.png
+var appIcon []byte
+
 // main 程序入口点
 func main() {
 	// 创建应用实例

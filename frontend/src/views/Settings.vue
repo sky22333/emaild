@@ -102,36 +102,32 @@ const selectDownloadPath = async () => {
 }
 
 const saveSettings = async () => {
+  if (saving.value) return
+  
   try {
     saving.value = true
     await appStore.saveSettings(settings.value)
     message.success('设置已保存')
   } catch (error) {
     console.error('保存设置失败:', error)
-    message.error('保存设置失败')
+    const errorMessage = error instanceof Error ? error.message : '保存设置失败'
+    message.error(errorMessage)
   } finally {
     saving.value = false
   }
 }
 
 const resetSettings = async () => {
+  if (saving.value) return
+  
   try {
     const defaultSettings = await appStore.loadSettings()
     if (defaultSettings) {
       settings.value = { ...defaultSettings }
-    } else {
-      settings.value = {
-        downloadPath: '',
-        maxConcurrency: 3,
-        autoStart: false,
-        minimizeToTray: true,
-        startMinimized: false,
-        checkInterval: 5,
-        enableNotification: true
-      }
+      message.info('设置已重置为默认值')
     }
-    message.info('设置已重置')
   } catch (error) {
+    console.error('重置设置失败:', error)
     message.error('重置设置失败')
   }
 }

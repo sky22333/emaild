@@ -345,12 +345,18 @@ const toggleAccount = async (account: any) => {
 }
 
 // 测试账户连接
-const testConnection = async (account: any) => {
+const testConnection = async (account?: any) => {
   testing.value = true
   
   try {
     await withErrorHandling(async () => {
-      await appStore.testEmailConnection(account.id)
+      // 如果传入了account参数，使用该账户测试连接
+      if (account) {
+        await appStore.testEmailConnection(account)
+      } else {
+        // 如果没有传入参数，使用当前表单的数据测试连接
+        await appStore.testEmailConnection(currentAccount.value)
+      }
       message.success('连接测试成功')
     }, '测试邮箱连接')
   } finally {

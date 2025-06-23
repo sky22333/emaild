@@ -1,334 +1,267 @@
 package services
 
 import (
-	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
+	_ "embed"
+	"context"
 	"time"
 
-	"fyne.io/systray"
+	"github.com/getlantern/systray"
 	"github.com/sirupsen/logrus"
-	"github.com/skratchdot/open-golang/open"
+
+	"emaild/backend/database"
 )
+
+//go:embed icon.ico
+var iconData []byte
 
 // TrayService 系统托盘服务
 type TrayService struct {
-	logger    *logrus.Logger
-	app       TrayApp
-	isRunning bool
-	mu        sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
+	db     *database.Database
+	logger *logrus.Logger
 	
-	// 防抖机制
-	lastClickTime time.Time
-	clickMutex    sync.Mutex
+	// 菜单项
+	mShow     *systray.MenuItem
+	mHide     *systray.MenuItem
+	mCheck    *systray.MenuItem
+	mSettings *systray.MenuItem
+	mQuit     *systray.MenuItem
+	
+	// 状态
+	isVisible bool
+	mutex     sync.RWMutex
+	
+	// 回调函数
+	onShow     func()
+	onHide     func()
+	onCheck    func()
+	onSettings func()
+	onQuit     func()
+	
+	// 优雅关闭相关
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	shutdownOnce   sync.Once
+	isShuttingDown bool
+	shutdownMutex  sync.RWMutex
 }
 
-// TrayApp 托盘应用接口
-type TrayApp interface {
-	RestoreFromTray()
-	QuitApp()
-	ShowNotification(title, message string)
-}
-
-// NewTrayService 创建托盘服务
-func NewTrayService(logger *logrus.Logger, app TrayApp) *TrayService {
+// NewTrayService 创建系统托盘服务
+func NewTrayService(db *database.Database, logger *logrus.Logger) *TrayService {
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	return &TrayService{
-		logger: logger,
-		app:    app,
-		ctx:    ctx,
-		cancel: cancel,
+		db:             db,
+		logger:         logger,
+		isVisible:      true,
+		ctx:            ctx,
+		cancel:         cancel,
+		isShuttingDown: false,
 	}
 }
 
-// Start 启动托盘服务
+// Start 启动系统托盘
 func (ts *TrayService) Start() error {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
+	ts.logger.Info("启动系统托盘服务")
 	
-	if ts.isRunning {
-		return fmt.Errorf("托盘服务已在运行")
-	}
-
-	ts.isRunning = true
-	
-	// 使用RunWithExternalLoop避免阻塞
+	ts.wg.Add(1)
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				ts.logger.Errorf("托盘服务崩溃: %v", r)
-				ts.mu.Lock()
-				ts.isRunning = false
-				ts.mu.Unlock()
-			}
-		}()
-		
+		defer ts.wg.Done()
 		systray.Run(ts.onReady, ts.onExit)
 	}()
 	
-	ts.logger.Info("系统托盘服务已启动")
 	return nil
 }
 
-// Stop 停止托盘服务
+// Stop 停止系统托盘
 func (ts *TrayService) Stop() {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	
-	if !ts.isRunning {
-		return
-	}
-
-	ts.isRunning = false
-	ts.cancel()
-	
-	// 安全退出托盘
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				ts.logger.Errorf("停止托盘服务时出错: %v", r)
-			}
-		}()
+	ts.shutdownOnce.Do(func() {
+		ts.logger.Info("开始停止系统托盘服务")
+		
+		// 设置关闭状态
+		ts.shutdownMutex.Lock()
+		ts.isShuttingDown = true
+		ts.shutdownMutex.Unlock()
+		
+		// 取消上下文
+		ts.cancel()
+		
+		// 退出系统托盘
 		systray.Quit()
-	}()
-	
-	ts.logger.Info("系统托盘服务已停止")
-}
-
-// IsRunning 检查服务是否运行中
-func (ts *TrayService) IsRunning() bool {
-	ts.mu.RLock()
-	defer ts.mu.RUnlock()
-	return ts.isRunning
-}
-
-// onReady 托盘准备就绪回调
-func (ts *TrayService) onReady() {
-	defer func() {
-		if r := recover(); r != nil {
-			ts.logger.Errorf("托盘初始化失败: %v", r)
+		
+		// 等待goroutine完成（带超时）
+		done := make(chan struct{})
+		go func() {
+			ts.wg.Wait()
+			close(done)
+		}()
+		
+		select {
+		case <-done:
+			ts.logger.Info("系统托盘服务已正常停止")
+		case <-time.After(10 * time.Second):
+			ts.logger.Warn("等待系统托盘服务停止超时")
 		}
-	}()
+	})
+}
+
+// onReady 托盘就绪回调
+func (ts *TrayService) onReady() {
+	ts.logger.Info("系统托盘就绪")
 	
-	// 设置托盘图标
-	ts.setTrayIcon()
+	// 设置内嵌的图标
+	if len(iconData) > 0 {
+		systray.SetIcon(iconData)
+		ts.logger.Info("已设置内嵌托盘图标")
+	} else {
+		ts.logger.Warn("内嵌图标数据为空")
+	}
 	
-	// 设置托盘提示
-	systray.SetTooltip("邮件附件下载器")
+	// 设置标题和提示
+	systray.SetTitle("邮件附件下载器")
+	systray.SetTooltip("邮件附件下载器 - 自动下载邮件中的PDF附件")
 	
 	// 创建菜单项
 	ts.createMenuItems()
 	
-	ts.logger.Info("系统托盘已就绪")
+	// 启动菜单事件处理
+	ts.wg.Add(1)
+	go ts.handleMenuEvents()
 }
 
 // onExit 托盘退出回调
 func (ts *TrayService) onExit() {
 	ts.logger.Info("系统托盘退出")
-	ts.mu.Lock()
-	ts.isRunning = false
-	ts.mu.Unlock()
-}
-
-// setTrayIcon 设置托盘图标
-func (ts *TrayService) setTrayIcon() {
-	iconData := ts.loadIcon()
-	if iconData != nil {
-		systray.SetIcon(iconData)
-	} else {
-		// 使用默认图标
-		systray.SetIcon(ts.getDefaultIcon())
-		ts.logger.Warn("使用默认托盘图标")
-	}
-}
-
-// loadIcon 加载图标
-func (ts *TrayService) loadIcon() []byte {
-	// 尝试从多个位置加载图标
-	iconPaths := []string{
-		"assets/icon.ico",
-		"assets/icon.png",
-		"./assets/icon.ico", 
-		"./assets/icon.png",
-		"icon.ico",
-		"icon.png",
-		"build/icon.ico",
-		"build/icon.png",
-	}
-	
-	// 获取可执行文件目录
-	if execPath, err := os.Executable(); err == nil {
-		execDir := filepath.Dir(execPath)
-		iconPaths = append(iconPaths, 
-			filepath.Join(execDir, "assets", "icon.ico"),
-			filepath.Join(execDir, "assets", "icon.png"),
-			filepath.Join(execDir, "icon.ico"),
-			filepath.Join(execDir, "icon.png"),
-		)
-	}
-	
-	for _, iconPath := range iconPaths {
-		if iconData, err := os.ReadFile(iconPath); err == nil {
-			ts.logger.Infof("成功加载托盘图标: %s", iconPath)
-			return iconData
-		} else {
-			ts.logger.Debugf("图标路径不存在: %s, 错误: %v", iconPath, err)
-		}
-	}
-	
-	ts.logger.Warn("未找到自定义图标，将使用默认图标")
-	return nil
-}
-
-// getDefaultIcon 获取默认图标数据
-func (ts *TrayService) getDefaultIcon() []byte {
-	// 简单的默认图标数据（16x16 PNG）
-	return []byte{
-		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-		0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10,
-		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x91, 0x68,
-		0x36, 0x00, 0x00, 0x00, 0x3C, 0x49, 0x44, 0x41,
-		0x54, 0x28, 0x15, 0x63, 0xF8, 0x0F, 0x00, 0x01,
-		0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB4, 0x1C,
-		0x20, 0x02, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
-		0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
-	}
 }
 
 // createMenuItems 创建菜单项
 func (ts *TrayService) createMenuItems() {
-	// 显示主窗口
-	mShow := systray.AddMenuItem("显示主窗口", "显示应用主窗口")
-	go ts.handleMenuClick(mShow.ClickedCh, "show", func() {
-		ts.app.RestoreFromTray()
-	})
-	
-	// 分隔符
+	ts.mShow = systray.AddMenuItem("显示主窗口", "显示主窗口")
+	ts.mHide = systray.AddMenuItem("隐藏主窗口", "隐藏主窗口")
 	systray.AddSeparator()
-	
-	// 打开下载文件夹
-	mOpenFolder := systray.AddMenuItem("打开下载文件夹", "打开下载文件夹")
-	go ts.handleMenuClick(mOpenFolder.ClickedCh, "folder", func() {
-		ts.openDownloadFolder()
-	})
-	
-	// 分隔符
+	ts.mCheck = systray.AddMenuItem("立即检查邮件", "立即检查所有邮箱的新邮件")
 	systray.AddSeparator()
+	ts.mSettings = systray.AddMenuItem("设置", "打开设置页面")
+	systray.AddSeparator()
+	ts.mQuit = systray.AddMenuItem("退出", "退出程序")
 	
-	// 退出应用
-	mQuit := systray.AddMenuItem("退出", "退出应用")
-	go ts.handleMenuClick(mQuit.ClickedCh, "quit", func() {
-		ts.app.QuitApp()
-	})
+	// 初始状态
+	ts.updateMenuState()
 }
 
-// handleMenuClick 处理菜单点击事件，带防抖机制
-func (ts *TrayService) handleMenuClick(clickedCh chan struct{}, action string, handler func()) {
+// handleMenuEvents 处理菜单事件
+func (ts *TrayService) handleMenuEvents() {
+	defer ts.wg.Done()
+	
 	for {
 		select {
-		case <-clickedCh:
-			// 防抖机制：防止快速重复点击
-			ts.clickMutex.Lock()
-			now := time.Now()
-			if now.Sub(ts.lastClickTime) < 300*time.Millisecond {
-				ts.clickMutex.Unlock()
-				continue
-			}
-			ts.lastClickTime = now
-			ts.clickMutex.Unlock()
-			
-			// 安全执行处理函数
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						ts.logger.Errorf("处理托盘菜单点击(%s)时出错: %v", action, r)
-					}
-				}()
-				handler()
-			}()
-			
 		case <-ts.ctx.Done():
+			ts.logger.Info("托盘菜单事件处理器收到关闭信号")
+			return
+			
+		case <-ts.mShow.ClickedCh:
+			// 检查是否正在关闭
+			ts.shutdownMutex.RLock()
+			if ts.isShuttingDown {
+				ts.shutdownMutex.RUnlock()
+				return
+			}
+			ts.shutdownMutex.RUnlock()
+			
+			if ts.onShow != nil {
+				ts.onShow()
+			}
+			ts.setVisible(true)
+			
+		case <-ts.mHide.ClickedCh:
+			ts.shutdownMutex.RLock()
+			if ts.isShuttingDown {
+				ts.shutdownMutex.RUnlock()
+				return
+			}
+			ts.shutdownMutex.RUnlock()
+			
+			if ts.onHide != nil {
+				ts.onHide()
+			}
+			ts.setVisible(false)
+			
+		case <-ts.mCheck.ClickedCh:
+			ts.shutdownMutex.RLock()
+			if ts.isShuttingDown {
+				ts.shutdownMutex.RUnlock()
+				return
+			}
+			ts.shutdownMutex.RUnlock()
+			
+			if ts.onCheck != nil {
+				ts.onCheck()
+			}
+			
+		case <-ts.mSettings.ClickedCh:
+			ts.shutdownMutex.RLock()
+			if ts.isShuttingDown {
+				ts.shutdownMutex.RUnlock()
+				return
+			}
+			ts.shutdownMutex.RUnlock()
+			
+			if ts.onSettings != nil {
+				ts.onSettings()
+			}
+			
+		case <-ts.mQuit.ClickedCh:
+			ts.logger.Info("用户点击退出菜单")
+			if ts.onQuit != nil {
+				ts.onQuit()
+			}
 			return
 		}
 	}
 }
 
-// openDownloadFolder 打开下载文件夹
-func (ts *TrayService) openDownloadFolder() {
-	// 获取用户主目录
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		ts.logger.Errorf("获取用户主目录失败: %v", err)
-		return
-	}
+// updateMenuState 更新菜单状态
+func (ts *TrayService) updateMenuState() {
+	ts.mutex.RLock()
+	isVisible := ts.isVisible
+	ts.mutex.RUnlock()
 	
-	// 默认下载路径
-	downloadPath := filepath.Join(homeDir, "Downloads", "EmailPDFs")
-	
-	// 确保目录存在
-	if err := os.MkdirAll(downloadPath, 0755); err != nil {
-		ts.logger.Errorf("创建下载目录失败: %v", err)
-		return
-	}
-	
-	// 打开目录
-	if err := ts.openPath(downloadPath); err != nil {
-		ts.logger.Errorf("打开下载目录失败: %v", err)
+	if isVisible {
+		ts.mShow.Hide()
+		ts.mHide.Show()
+	} else {
+		ts.mShow.Show()
+		ts.mHide.Hide()
 	}
 }
 
-// openPath 跨平台打开路径
-func (ts *TrayService) openPath(path string) error {
-	switch runtime.GOOS {
-	case "windows":
-		return open.Run(path)
-	case "darwin":
-		return open.Run(path)
-	case "linux":
-		return open.Run(path)
-	default:
-		return fmt.Errorf("不支持的操作系统: %s", runtime.GOOS)
-	}
+// setVisible 设置窗口可见性
+func (ts *TrayService) setVisible(visible bool) {
+	ts.mutex.Lock()
+	ts.isVisible = visible
+	ts.mutex.Unlock()
+	
+	ts.updateMenuState()
+}
+
+// SetCallbacks 设置回调函数
+func (ts *TrayService) SetCallbacks(onShow, onHide, onCheck, onSettings, onQuit func()) {
+	ts.onShow = onShow
+	ts.onHide = onHide
+	ts.onCheck = onCheck
+	ts.onSettings = onSettings
+	ts.onQuit = onQuit
 }
 
 // ShowNotification 显示通知
 func (ts *TrayService) ShowNotification(title, message string) {
-	ts.logger.Infof("通知: %s - %s", title, message)
-	
-	// 根据操作系统显示通知
-	switch runtime.GOOS {
-	case "windows":
-		ts.showWindowsNotification(title, message)
-	case "darwin":
-		ts.showMacNotification(title, message)
-	case "linux":
-		ts.showLinuxNotification(title, message)
-	default:
-		ts.logger.Warnf("不支持的操作系统通知: %s", runtime.GOOS)
-	}
+	ts.logger.Infof("托盘通知: %s - %s", title, message)
+	// systray包本身不支持通知，这里只记录日志
 }
 
-// showWindowsNotification Windows通知
-func (ts *TrayService) showWindowsNotification(title, message string) {
-	ts.logger.Infof("Windows通知: %s - %s", title, message)
-	// 这里可以使用Windows API显示通知
-}
-
-// showMacNotification macOS通知
-func (ts *TrayService) showMacNotification(title, message string) {
-	ts.logger.Infof("macOS通知: %s - %s", title, message)
-	// 这里可以使用macOS API显示通知
-}
-
-// showLinuxNotification Linux通知
-func (ts *TrayService) showLinuxNotification(title, message string) {
-	ts.logger.Infof("Linux通知: %s - %s", title, message)
-	// 这里可以使用Linux API显示通知
+// UpdateStatus 更新状态
+func (ts *TrayService) UpdateStatus(status string) {
+	systray.SetTooltip(fmt.Sprintf("邮件附件下载器 - %s", status))
 } 

@@ -13,35 +13,45 @@ type GetDownloadTasksResponse = backend.GetDownloadTasksResponse
 
 // 检查Wails运行时是否可用
 const isWailsReady = (): boolean => {
-  return !!(window as any)?.go?.backend?.App
+  try {
+    return !!(window as any)?.go?.backend?.App && typeof (window as any).go.backend.App === 'object'
+  } catch {
+    return false
+  }
 }
 
 // 等待Wails运行时准备就绪
 const waitForWails = (): Promise<void> => {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (isWailsReady()) {
       resolve()
       return
     }
     
+    let attempts = 0
+    const maxAttempts = 50 // 5秒超时
+    
     const checkInterval = setInterval(() => {
+      attempts++
+      
       if (isWailsReady()) {
         clearInterval(checkInterval)
         resolve()
+        return
+      }
+      
+      if (attempts >= maxAttempts) {
+        clearInterval(checkInterval)
+        console.warn('Wails运行时初始化超时')
+        reject(new Error('Wails运行时初始化超时'))
+        return
       }
     }, 100)
-    
-    // 超时处理
-    setTimeout(() => {
-      clearInterval(checkInterval)
-      console.warn('Wails运行时初始化超时')
-      resolve()
-    }, 5000)
   })
 }
 
 export function useApi() {
-  const { withErrorHandling, isLoading, error } = useErrorHandler()
+  const errorHandler = useErrorHandler()
   
   // 安全的API调用包装器
   const safeApiCall = async <T>(
@@ -55,7 +65,7 @@ export function useApi() {
       throw new Error('Wails运行时未准备就绪')
     }
     
-    const result = await withErrorHandling(apiCall, context)
+    const result = await errorHandler.wrapAsync(apiCall, context)
     return result as T
   }
 
@@ -286,8 +296,8 @@ export function useApi() {
     system: systemApi,
     
     // 状态
-    isLoading: computed(() => isLoading.value),
-    error: computed(() => error.value)
+    isLoading: computed(() => errorHandler.isRetrying.value),
+    error: computed(() => errorHandler.lastError.value)
   }
 }
 

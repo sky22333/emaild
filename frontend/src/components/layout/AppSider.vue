@@ -88,11 +88,7 @@ const menuOptions = computed(() => [
     key: 'downloads',
     icon: renderIcon('⬇️')
   },
-  {
-    label: '统计分析',
-    key: 'statistics',
-    icon: renderIcon('📈')
-  },
+
   {
     type: 'divider',
     key: 'divider'

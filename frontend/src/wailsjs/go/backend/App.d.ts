@@ -63,6 +63,8 @@ export function StopEmailMonitoring():Promise<void>;
 
 export function TestEmailConnection(arg1:models.EmailAccount):Promise<void>;
 
+export function TestEmailConnectionByID(arg1:number):Promise<void>;
+
 export function UpdateConfig(arg1:models.AppConfig):Promise<void>;
 
 export function UpdateEmailAccount(arg1:models.EmailAccount):Promise<void>;

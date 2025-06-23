@@ -195,7 +195,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useAppStore } from '../stores/app'
-import { useErrorHandler } from '../composables/useErrorHandler'
+import { useErrorHandler, ErrorType, ErrorLevel } from '../composables/useErrorHandler'
 import {
   NButton,
   NSpace,
@@ -205,11 +205,12 @@ import {
   NTag,
   NSwitch,
   useMessage,
-  useDialog
+  useDialog,
+  NIcon
 } from 'naive-ui'
 
 const appStore = useAppStore()
-const { withErrorHandling, isLoading, error, clearError } = useErrorHandler()
+const errorHandler = useErrorHandler()
 const message = useMessage()
 const dialog = useDialog()
 
@@ -225,75 +226,44 @@ const showTimestamp = ref(true)
 const compactMode = ref(false)
 const logContentRef = ref()
 
-// 模拟日志数据（实际应用中应该从后端获取）
-const logs = ref([
-  {
-    id: 1,
-    timestamp: new Date(),
-    level: 'info',
-    message: '应用启动成功',
-    source: 'system',
+// 计算属性 - 使用真实的错误数据
+const logs = computed(() => {
+  return errorHandler.errors.value.map((error, index) => ({
+    id: index + 1,
+    timestamp: new Date(error.timestamp),
+    level: error.level,
+    message: error.message,
+    source: error.operation || 'system',
     expanded: false,
-    details: null,
-    stackTrace: null,
-    requestId: null
-  },
-  {
-    id: 2,
-    timestamp: new Date(Date.now() - 60000),
-    level: 'debug',
-    message: '邮件检查服务已启动',
-    source: 'email-service',
-    expanded: false,
-    details: { interval: '5分钟', accounts: 2 },
-    stackTrace: null,
-    requestId: 'req-001'
-  },
-  {
-    id: 3,
-    timestamp: new Date(Date.now() - 120000),
-    level: 'warn',
-    message: '下载文件夹权限不足',
-    source: 'download-service',
-    expanded: false,
-    details: { path: 'C:\\Downloads\\EmailPDFs', permission: 'read-only' },
-    stackTrace: null,
-    requestId: 'req-002'
-  },
-  {
-    id: 4,
-    timestamp: new Date(Date.now() - 180000),
-    level: 'error',
-    message: 'IMAP连接失败',
-    source: 'email-service',
-    expanded: false,
-    details: { server: 'imap.gmail.com', port: 993, ssl: true },
-    stackTrace: 'Error: Connection timeout\n  at IMAPClient.connect()\n  at EmailService.checkEmails()',
-    requestId: 'req-003'
-  }
-])
+    details: error.originalError ? { error: error.originalError } : null,
+    stackTrace: error.originalError?.stack || null,
+    requestId: null,
+    type: error.type
+  }))
+})
 
-const hasMoreLogs = ref(true)
+const hasMoreLogs = ref(false) // 目前使用内存中的错误，没有分页
 
 // 日志级别选项
 const logLevelOptions = [
   { label: '全部', value: '' },
-  { label: '调试', value: 'debug' },
-  { label: '信息', value: 'info' },
-  { label: '警告', value: 'warn' },
-  { label: '错误', value: 'error' }
+  { label: 'INFO', value: 'info' },
+  { label: 'DEBUG', value: 'debug' },
+  { label: 'WARN', value: 'warning' },
+  { label: 'ERROR', value: 'error' },
+  { label: 'CRITICAL', value: 'critical' }
 ]
 
 // 计算属性
 const filteredLogs = computed(() => {
-  let filtered = logs.value || []
-  
-  // 按级别筛选
+  let filtered = logs.value
+
+  // 级别过滤
   if (selectedLevel.value) {
     filtered = filtered.filter(log => log.level === selectedLevel.value)
   }
-  
-  // 按关键词搜索
+
+  // 关键词搜索
   if (searchKeyword.value) {
     const keyword = searchKeyword.value.toLowerCase()
     filtered = filtered.filter(log => 
@@ -301,17 +271,17 @@ const filteredLogs = computed(() => {
       log.source.toLowerCase().includes(keyword)
     )
   }
-  
-  // 按日期范围筛选
-  if (dateRange.value && dateRange.value[0] && dateRange.value[1]) {
+
+  // 日期范围过滤
+  if (dateRange.value && Array.isArray(dateRange.value) && dateRange.value.length === 2) {
     const [startDate, endDate] = dateRange.value
     filtered = filtered.filter(log => {
-      const logDate = new Date(log.timestamp)
+      const logDate = log.timestamp.getTime()
       return logDate >= startDate && logDate <= endDate
     })
   }
-  
-  return filtered.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+
+  return filtered.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
 })
 
 const logStats = computed(() => {
@@ -328,94 +298,63 @@ const logStats = computed(() => {
 // 方法
 const refreshLogs = async () => {
   loading.value = true
-  
   try {
-    await withErrorHandling(async () => {
-      // 这里应该调用后端API获取日志
-      // const result = await appStore.getLogs()
-      // logs.value = result
-      
-      // 模拟刷新
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      message.success('日志已刷新')
-    }, '刷新日志')
+    // 刷新应用数据，这可能会产生新的日志
+    await Promise.allSettled([
+      appStore.loadEmailAccounts(),
+      appStore.loadDownloadTasks(),
+      appStore.checkServiceStatus()
+    ])
+    message.success('日志已刷新')
+  } catch (error) {
+    message.error('刷新日志失败')
   } finally {
     loading.value = false
   }
 }
 
-const clearLogs = async () => {
+const clearLogs = () => {
   dialog.warning({
-    title: '清空日志',
+    title: '确认清空',
     content: '确定要清空所有日志记录吗？此操作不可撤销。',
     positiveText: '确定',
     negativeText: '取消',
-    onPositiveClick: async () => {
-      await withErrorHandling(async () => {
-        logs.value = []
-        message.success('日志已清空')
-      }, '清空日志')
+    onPositiveClick: () => {
+      errorHandler.clearErrors()
+      message.success('日志已清空')
     }
   })
 }
 
-const exportLogs = async () => {
-  await withErrorHandling(async () => {
-    const logData = filteredLogs.value.map(log => ({
-      时间: formatFullTime(log.timestamp),
-      级别: log.level.toUpperCase(),
-      来源: log.source,
-      消息: log.message,
-      详情: log.details ? JSON.stringify(log.details) : '',
-      请求ID: log.requestId || ''
+const exportLogs = () => {
+  try {
+    const logsData = filteredLogs.value.map(log => ({
+      timestamp: log.timestamp.toISOString(),
+      level: log.level,
+      source: log.source,
+      message: log.message,
+      details: log.details,
+      stackTrace: log.stackTrace
     }))
     
-    const csvContent = [
-      Object.keys(logData[0]).join(','),
-      ...logData.map(row => Object.values(row).map(val => `"${val}"`).join(','))
-    ].join('\n')
-    
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+    const dataStr = JSON.stringify(logsData, null, 2)
+    const dataBlob = new Blob([dataStr], {type: 'application/json'})
+    const url = URL.createObjectURL(dataBlob)
     const link = document.createElement('a')
-    link.href = URL.createObjectURL(blob)
-    link.download = `logs-${new Date().toISOString().split('T')[0]}.csv`
+    link.href = url
+    link.download = `logs-${new Date().toISOString().split('T')[0]}.json`
     link.click()
+    URL.revokeObjectURL(url)
     
     message.success('日志已导出')
-  }, '导出日志')
+  } catch (error) {
+    message.error('导出日志失败')
+  }
 }
 
-const loadMoreLogs = async () => {
-  loadingMore.value = true
-  
-  try {
-    await withErrorHandling(async () => {
-      // 模拟加载更多日志
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      const moreLogs = [
-        {
-          id: logs.value.length + 1,
-          timestamp: new Date(Date.now() - 300000),
-          level: 'info',
-          message: '定时任务执行成功',
-          source: 'scheduler',
-          expanded: false,
-          details: null,
-          stackTrace: null,
-          requestId: null
-        }
-      ]
-      
-      logs.value.push(...moreLogs)
-      
-      if (logs.value.length > 50) {
-        hasMoreLogs.value = false
-      }
-    }, '加载更多日志')
-  } finally {
-    loadingMore.value = false
-  }
+const loadMoreLogs = () => {
+  // 当前版本不支持分页加载
+  message.info('已显示所有日志')
 }
 
 const toggleLogDetails = (index) => {
@@ -449,44 +388,28 @@ const getLogTagType = (level) => {
   return types[level] || 'default'
 }
 
-const formatTime = (timestamp) => {
-  return new Date(timestamp).toLocaleTimeString('zh-CN', {
-    hour12: false,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
+const formatTime = (date) => {
+  return date.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
-const formatFullTime = (timestamp) => {
-  return new Date(timestamp).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false
-  })
+const formatFullTime = (date) => {
+  return date.toLocaleString('zh-CN')
 }
-
-// 自动滚动到底部
-const scrollToBottom = () => {
-  if (autoScroll.value && logContentRef.value) {
-    nextTick(() => {
-      logContentRef.value.scrollTop = logContentRef.value.scrollHeight
-    })
-  }
-}
-
-// 监听日志变化，自动滚动
-watch(() => logs.value.length, () => {
-  scrollToBottom()
-})
 
 // 生命周期
 onMounted(() => {
-  refreshLogs()
+  // 初始加载不需要特殊操作，错误处理器已经在收集错误
+})
+
+// 监听自动滚动
+watch([filteredLogs, autoScroll], () => {
+  if (autoScroll.value) {
+    nextTick(() => {
+      if (logContentRef.value) {
+        logContentRef.value.scrollTop = logContentRef.value.scrollHeight
+      }
+    })
+  }
 })
 </script>
 

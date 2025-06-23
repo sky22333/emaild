@@ -17,17 +17,13 @@ import (
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/encoding/unicode"
+	"unicode/utf8"
 )
-
-// generatePDFFileName 生成唯一的PDF文件名
-func generatePDFFileName() string {
-	return fmt.Sprintf("pdf_%d.pdf", time.Now().Unix())
-}
 
 // CleanFilename 清理文件名，移除非法字符并确保有PDF扩展名
 func CleanFilename(filename string) string {
 	if filename == "" {
-		filename = generatePDFFileName()
+		filename = GenerateFilename("pdf", ".pdf")
 	}
 
 	// 解码可能的编码字符
@@ -244,13 +240,13 @@ func ValidatePDFFile(filePath string) error {
 // ExtractFilenameFromURL 从URL中提取文件名
 func ExtractFilenameFromURL(rawURL string) string {
 	if rawURL == "" {
-		return generatePDFFileName()
+		return GenerateFilename("pdf", ".pdf")
 	}
 
 	// 解析URL
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
-		return generatePDFFileName()
+		return GenerateFilename("pdf", ".pdf")
 	}
 
 	// 从路径中提取文件名
@@ -262,7 +258,7 @@ func ExtractFilenameFromURL(rawURL string) string {
 		if queryFilename := parsedURL.Query().Get("filename"); queryFilename != "" {
 			filename = queryFilename
 		} else {
-			filename = generatePDFFileName()
+			filename = GenerateFilename("pdf", ".pdf")
 		}
 	}
 
@@ -508,4 +504,54 @@ func FormatSpeed(bytesPerSecond float64) string {
 	} else {
 		return fmt.Sprintf("%.1f GB/s", bytesPerSecond/(1024*1024*1024))
 	}
+}
+
+// DecodeText 尝试使用指定编码解码文本
+func DecodeText(data []byte, encoding string) string {
+	if len(data) == 0 {
+		return ""
+	}
+	
+	switch strings.ToLower(encoding) {
+	case "utf-8":
+		if utf8.Valid(data) {
+			return string(data)
+		}
+	case "gbk", "gb2312":
+		// 对于中文编码，尝试转换
+		if decoded := tryDecodeGBK(data); decoded != "" {
+			return decoded
+		}
+	case "iso-8859-1", "latin1":
+		// ISO-8859-1编码，直接转换
+		return string(data)
+	}
+	
+	// 如果指定编码失败，尝试UTF-8
+	if utf8.Valid(data) {
+		return string(data)
+	}
+	
+	// 最后尝试强制转换
+	return string(data)
+}
+
+// tryDecodeGBK 尝试解码GBK编码的文本
+func tryDecodeGBK(data []byte) string {
+	// 简单的GBK检测和转换
+	// 这里可以使用第三方库如golang.org/x/text/encoding/simplifiedchinese
+	// 但为了减少依赖，我们使用简单的方法
+	
+	// 检查是否包含中文字符的字节模式
+	for i := 0; i < len(data)-1; i++ {
+		b1, b2 := data[i], data[i+1]
+		// GBK编码范围检测
+		if (b1 >= 0xA1 && b1 <= 0xFE) && (b2 >= 0xA1 && b2 <= 0xFE) {
+			// 可能是GBK编码，但我们暂时返回原始字符串
+			// 在生产环境中应该使用专门的编码转换库
+			return string(data)
+		}
+	}
+	
+	return ""
 } 

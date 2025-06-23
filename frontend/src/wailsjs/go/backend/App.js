@@ -122,6 +122,10 @@ export function TestEmailConnection(arg1) {
   return window['go']['backend']['App']['TestEmailConnection'](arg1);
 }
 
+export function TestEmailConnectionByID(arg1) {
+  return window['go']['backend']['App']['TestEmailConnectionByID'](arg1);
+}
+
 export function UpdateConfig(arg1) {
   return window['go']['backend']['App']['UpdateConfig'](arg1);
 }

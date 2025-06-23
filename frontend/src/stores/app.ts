@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useApi } from '../composables/useApi'
+import { backend } from '../wailsjs/go/models'
 import type { 
   EmailAccount, 
   DownloadTask, 
@@ -49,71 +50,88 @@ export const useAppStore = defineStore('app', () => {
   const isLoading = computed(() => api.isLoading.value)
   const error = computed(() => api.error.value)
 
+  // 简化的错误处理包装器
+  const safeCall = async <T>(operation: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await operation()
+    } catch (error) {
+      console.error('API调用失败:', error)
+      return null
+    }
+  }
+
   // Actions - 配置管理
   const loadConfig = async () => {
-    const result = await api.config.getConfig()
-    config.value = result
+    const result = await safeCall(() => api.config.getConfig())
+    if (result) {
+      config.value = result
+    }
     return result
   }
 
   const updateConfig = async (newConfig: Partial<AppConfig>) => {
     if (config.value) {
       const updatedConfig = { ...config.value, ...newConfig }
-      await api.config.updateConfig(updatedConfig)
-      config.value = updatedConfig
+      const result = await safeCall(() => api.config.updateConfig(updatedConfig))
+      if (result !== null) {
+        config.value = updatedConfig
+      }
     }
   }
 
   // Actions - 邮箱账户管理
   const loadEmailAccounts = async () => {
-    const result = await api.email.getAccounts()
+    const result = await safeCall(() => api.email.getAccounts())
     emailAccounts.value = result || []
     return result || []
   }
 
   const addEmailAccount = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    await api.email.createAccount(account as EmailAccount)
-    await loadEmailAccounts()
+    const result = await safeCall(() => api.email.createAccount(account as EmailAccount))
+    if (result !== null) {
+      await loadEmailAccounts()
+    }
   }
 
   const updateEmailAccount = async (account: EmailAccount) => {
-    await api.email.updateAccount(account)
-    await loadEmailAccounts()
+    const result = await safeCall(() => api.email.updateAccount(account))
+    if (result !== null) {
+      await loadEmailAccounts()
+    }
   }
 
   const deleteEmailAccount = async (id: number) => {
-    await api.email.deleteAccount(id)
-    await loadEmailAccounts()
+    const result = await safeCall(() => api.email.deleteAccount(id))
+    if (result !== null) {
+      await loadEmailAccounts()
+    }
   }
 
   const testEmailConnection = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    return await api.email.testConnection(account as EmailAccount)
+    return await safeCall(() => api.email.testConnection(account as EmailAccount))
   }
 
-  // Actions - 邮件检查
   const checkAllEmails = async (): Promise<EmailCheckResult[]> => {
-    const result = await api.email.checkAllEmails()
+    const result = await safeCall(() => api.email.checkAllEmails())
     return result || []
   }
 
   const checkSingleEmail = async (accountId: number): Promise<EmailCheckResult> => {
-    const result = await api.email.checkSingleEmail(accountId)
-    return result || { account: null, new_emails: 0, pdfs_found: 0, error: '', success: false }
+    const result = await safeCall(() => api.email.checkSingleEmail(accountId))
+    return result || backend.EmailCheckResult.createFrom({ account: null, new_emails: 0, pdfs_found: 0, error: '', success: false })
   }
 
   const startEmailMonitoring = async () => {
-    await api.email.startMonitoring()
-    await checkServiceStatus()
+    await safeCall(() => api.email.startMonitoring())
   }
 
   const stopEmailMonitoring = async () => {
-    await api.email.stopMonitoring()
-    await checkServiceStatus()
+    await safeCall(() => api.email.stopMonitoring())
   }
 
   // Actions - 下载任务管理
   const loadDownloadTasks = async (page = 1, pageSize = 20) => {
-    const result = await api.download.getTasks(page, pageSize)
+    const result = await safeCall(() => api.download.getTasks(page, pageSize))
     if (result && result.tasks) {
       downloadTasks.value = result.tasks || []
       return result
@@ -123,89 +141,68 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  const getActiveDownloads = async () => {
-    const result = await api.download.getActiveDownloads()
-    return result || []
-  }
-
   const pauseTask = async (taskId: number) => {
-    await api.download.pauseTask(taskId)
-    await loadDownloadTasks()
+    const result = await safeCall(() => api.download.pauseTask(taskId))
+    if (result !== null) {
+      await loadDownloadTasks()
+    }
   }
 
   const resumeTask = async (taskId: number) => {
-    await api.download.resumeTask(taskId)
-    await loadDownloadTasks()
+    const result = await safeCall(() => api.download.resumeTask(taskId))
+    if (result !== null) {
+      await loadDownloadTasks()
+    }
   }
 
   const cancelTask = async (taskId: number) => {
-    await api.download.cancelTask(taskId)
-    await loadDownloadTasks()
+    const result = await safeCall(() => api.download.cancelTask(taskId))
+    if (result !== null) {
+      await loadDownloadTasks()
+    }
   }
 
   // Actions - 统计数据
   const loadStatistics = async (days = 30) => {
-    const result = await api.stats.getStatistics(days)
+    const result = await safeCall(() => api.stats.getStatistics(days))
     statistics.value = result || []
     return result || []
   }
 
   // Actions - 服务状态
   const checkServiceStatus = async () => {
-    const result = await api.system.getServiceStatus()
-    serviceStatus.value = {
-      email: result?.email || false,
-      download: result?.download || false
+    const result = await safeCall(() => api.system.getServiceStatus())
+    if (result) {
+      serviceStatus.value = {
+        email: result.email || false,
+        download: result.download || false
+      }
     }
     return result || { email: false, download: false }
   }
 
   // Actions - 系统操作
   const openDownloadFolder = async () => {
-    await api.system.openDownloadFolder()
-  }
-
-  const openFile = async (filePath: string) => {
-    await api.system.openFile(filePath)
+    return await safeCall(() => api.system.openDownloadFolder())
   }
 
   const selectDownloadFolder = async (): Promise<string> => {
-    const result = await api.system.selectDownloadFolder()
-    return result
-  }
-
-  const showNotification = async (title: string, message: string) => {
-    await api.system.showNotification(title, message)
-  }
-
-  const getAppInfo = async () => {
-    const result = await api.system.getAppInfo()
-    return result
-  }
-
-  const minimizeToTray = async () => {
-    await api.system.minimizeToTray()
-  }
-
-  const restoreFromTray = async () => {
-    await api.system.restoreFromTray()
-  }
-
-  const quitApp = async () => {
-    await api.system.quitApp()
+    const result = await safeCall(() => api.system.selectDownloadFolder())
+    return result || ''
   }
 
   // 设置管理的便捷方法
   const saveSettings = async (settings: any) => {
-    // 将前端设置字段映射到后端配置字段
     const configToSave: Partial<AppConfig> = {
-      download_path: settings.downloadPath,
-      max_concurrent: settings.maxConcurrency,
-      check_interval: settings.checkInterval,
+      download_path: settings.downloadPath || '',
+      max_concurrent: settings.maxConcurrency || 3,
+      check_interval: settings.checkInterval || 5,
       auto_check: settings.autoStart || false,
-      minimize_to_tray: settings.minimizeToTray,
+      minimize_to_tray: settings.minimizeToTray !== undefined ? settings.minimizeToTray : true,
       start_minimized: settings.startMinimized || false,
-      enable_notification: settings.enableNotification
+      enable_notification: settings.enableNotification !== undefined ? settings.enableNotification : true,
+      theme: settings.theme || 'light',
+      language: settings.language || 'zh-CN'
     }
     
     await updateConfig(configToSave)
@@ -213,31 +210,30 @@ export const useAppStore = defineStore('app', () => {
 
   const loadSettings = async () => {
     const config = await loadConfig()
-    if (!config) return null
-    
-    // 将后端配置字段映射到前端设置字段
-    return {
-      downloadPath: config.download_path,
-      maxConcurrency: config.max_concurrent,
-      checkInterval: config.check_interval,
-      autoStart: config.auto_check,
-      minimizeToTray: config.minimize_to_tray,
-      startMinimized: config.start_minimized,
-      enableNotification: config.enable_notification
+    if (!config) {
+      return {
+        downloadPath: '',
+        maxConcurrency: 3,
+        checkInterval: 5,
+        autoStart: false,
+        minimizeToTray: true,
+        startMinimized: false,
+        enableNotification: true,
+        theme: 'light',
+        language: 'zh-CN'
+      }
     }
-  }
-
-  // 初始化应用数据
-  const initialize = async () => {
-    try {
-      await Promise.all([
-        loadConfig(),
-        loadEmailAccounts(),
-        loadDownloadTasks(),
-        checkServiceStatus()
-      ])
-    } catch (error) {
-      console.error('初始化应用数据失败:', error)
+    
+    return {
+      downloadPath: config.download_path || '',
+      maxConcurrency: config.max_concurrent || 3,
+      checkInterval: config.check_interval || 5,
+      autoStart: config.auto_check || false,
+      minimizeToTray: config.minimize_to_tray !== undefined ? config.minimize_to_tray : true,
+      startMinimized: config.start_minimized || false,
+      enableNotification: config.enable_notification !== undefined ? config.enable_notification : true,
+      theme: config.theme || 'light',
+      language: config.language || 'zh-CN'
     }
   }
 
@@ -271,23 +267,15 @@ export const useAppStore = defineStore('app', () => {
     startEmailMonitoring,
     stopEmailMonitoring,
     loadDownloadTasks,
-    getActiveDownloads,
     pauseTask,
     resumeTask,
     cancelTask,
     loadStatistics,
     checkServiceStatus,
     openDownloadFolder,
-    openFile,
     selectDownloadFolder,
-    showNotification,
-    getAppInfo,
-    minimizeToTray,
-    restoreFromTray,
-    quitApp,
     saveSettings,
-    loadSettings,
-    initialize
+    loadSettings
   }
 })
 
