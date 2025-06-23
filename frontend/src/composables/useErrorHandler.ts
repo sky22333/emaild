@@ -341,6 +341,9 @@ export function useErrorHandler(config: Partial<ErrorHandlerConfig> = {}) {
     return stats
   }
 
+  // withErrorHandling 别名，提供更直观的API
+  const withErrorHandling = wrapAsync
+
   return {
     // 状态
     errors: readonly(errors),
@@ -356,6 +359,7 @@ export function useErrorHandler(config: Partial<ErrorHandlerConfig> = {}) {
     handleError,
     retryOperation,
     wrapAsync,
+    withErrorHandling, // 添加别名
     clearErrors,
     clearErrorsByType,
     clearExpiredErrors,

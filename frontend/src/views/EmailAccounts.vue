@@ -151,37 +151,77 @@
     </div>
 
     <!-- 添加/编辑邮箱模态框 -->
-    <n-modal v-model:show="showAddModal" preset="dialog" title="添加邮箱账户">
-      <n-form :model="currentAccount" :rules="accountRules" ref="accountFormRef">
-        <n-form-item label="邮箱地址" path="email">
-          <n-input v-model:value="currentAccount.email" placeholder="请输入邮箱地址" />
-        </n-form-item>
-        
-        <n-form-item label="邮箱密码" path="password">
-          <n-input v-model:value="currentAccount.password" type="password" placeholder="请输入邮箱密码或授权码" />
-        </n-form-item>
-        
-        <n-form-item label="IMAP服务器" path="imap_server">
-          <n-input v-model:value="currentAccount.imap_server" placeholder="如: imap.qq.com" />
-        </n-form-item>
-        
-        <n-form-item label="IMAP端口" path="imap_port">
-          <n-input-number v-model:value="currentAccount.imap_port" :min="1" :max="65535" />
-        </n-form-item>
-        
-        <n-form-item label="使用SSL">
-          <n-switch v-model:value="currentAccount.use_ssl" />
-        </n-form-item>
-        
-        <n-form-item label="启用账户">
-          <n-switch v-model:value="currentAccount.is_active" />
-        </n-form-item>
-      </n-form>
+    <n-modal v-model:show="showAddModal" preset="dialog" :title="editingAccount ? '编辑邮箱账户' : '添加邮箱账户'">
+              <n-form :model="currentAccount" :rules="accountRules" ref="accountFormRef">
+          <n-form-item label="账户名称" path="name">
+            <n-input 
+              v-model:value="currentAccount.name" 
+              placeholder="请输入账户名称（可选）"
+              clearable
+            />
+          </n-form-item>
+          
+          <n-form-item label="邮箱地址" path="email">
+            <n-input 
+              v-model:value="currentAccount.email" 
+              placeholder="请输入邮箱地址" 
+              clearable
+              :disabled="!!editingAccount"
+            />
+            <template #feedback v-if="editingAccount">
+              <span class="text-gray-500 text-xs">编辑时不可修改邮箱地址</span>
+            </template>
+          </n-form-item>
+          
+          <n-form-item label="邮箱密码" path="password">
+            <n-input 
+              v-model:value="currentAccount.password" 
+              type="password" 
+              placeholder="请输入邮箱密码或授权码"
+              show-password-on="click"
+              clearable
+            />
+            <template #feedback>
+              <span class="text-gray-500 text-xs">建议使用邮箱授权码而非登录密码</span>
+            </template>
+          </n-form-item>
+          
+          <n-form-item label="IMAP服务器" path="imap_server">
+            <n-input 
+              v-model:value="currentAccount.imap_server" 
+              placeholder="如: imap.qq.com" 
+              clearable
+            />
+          </n-form-item>
+          
+          <n-form-item label="IMAP端口" path="imap_port">
+            <n-input-number 
+              v-model:value="currentAccount.imap_port" 
+              :min="1" 
+              :max="65535"
+              placeholder="993 (SSL) 或 143 (非SSL)"
+            />
+          </n-form-item>
+          
+          <n-form-item label="使用SSL">
+            <n-switch v-model:value="currentAccount.use_ssl">
+              <template #checked>安全连接</template>
+              <template #unchecked>普通连接</template>
+            </n-switch>
+          </n-form-item>
+          
+          <n-form-item label="启用账户">
+            <n-switch v-model:value="currentAccount.is_active">
+              <template #checked>已启用</template>
+              <template #unchecked>已禁用</template>
+            </n-switch>
+          </n-form-item>
+        </n-form>
       
       <template #action>
         <n-space>
           <n-button @click="testConnection" :loading="testing">测试连接</n-button>
-          <n-button @click="showAddModal = false">取消</n-button>
+          <n-button @click="closeModal">取消</n-button>
           <n-button type="primary" @click="saveAccount" :loading="saving">保存</n-button>
         </n-space>
       </template>
@@ -350,15 +390,20 @@ const testConnection = async (account?: any) => {
   
   try {
     await withErrorHandling(async () => {
-      // 如果传入了account参数，使用该账户测试连接
-      if (account) {
-        await appStore.testEmailConnection(account)
-      } else {
-        // 如果没有传入参数，使用当前表单的数据测试连接
-        await appStore.testEmailConnection(currentAccount.value)
+      // 确定要测试的账户数据
+      const testAccount = account || currentAccount.value
+      
+      // 验证必要字段
+      if (!testAccount.email || !testAccount.password || !testAccount.imap_server) {
+        throw new Error('请填写完整的邮箱配置信息')
       }
-      message.success('连接测试成功')
+      
+      await appStore.testEmailConnection(testAccount)
+      message.success('连接测试成功！邮箱配置正确')
     }, '测试邮箱连接')
+  } catch (error) {
+    console.error('测试连接失败:', error)
+    message.error('连接测试失败: ' + (error.message || '请检查邮箱配置'))
   } finally {
     testing.value = false
   }
@@ -366,13 +411,23 @@ const testConnection = async (account?: any) => {
 
 // 检查邮件
 const checkEmails = async (account: any) => {
+  // 防止重复点击
+  if (account.checking) return
+  
   account.checking = true
   
   try {
     await withErrorHandling(async () => {
       const result = await appStore.checkSingleEmail(account.id)
-      message.success(`检查完成：发现 ${result.new_emails} 封新邮件，${result.pdfs_found} 个PDF文件`)
+      if (result && result.success) {
+        message.success(`检查完成：发现 ${result.new_emails} 封新邮件，${result.pdfs_found} 个PDF文件`)
+      } else {
+        throw new Error(result?.error || '检查邮件失败')
+      }
     }, '检查邮件')
+  } catch (error) {
+    console.error('检查邮件失败:', error)
+    message.error('检查邮件失败: ' + (error.message || '未知错误'))
   } finally {
     account.checking = false
   }
@@ -382,15 +437,16 @@ const checkEmails = async (account: any) => {
 const editAccount = (account: any) => {
   editingAccount.value = account
   Object.assign(currentAccount.value, {
+    id: account.id,
+    name: account.name || '',
     email: account.email,
     password: '', // 出于安全考虑，不显示密码
     imap_server: account.imap_server,
     imap_port: account.imap_port,
     use_ssl: account.use_ssl,
     is_active: account.is_active,
-    connectionStatus: account.connectionStatus,
-    lastCheck: account.lastCheck,
-    processedCount: account.processedCount
+    created_at: account.created_at,
+    updated_at: account.updated_at
   })
   showAddModal.value = true
 }
@@ -413,7 +469,12 @@ const confirmDelete = async () => {
       message.success('账户已删除')
       showDeleteDialog.value = false
       deletingAccount.value = null
+      // 重新加载账户列表
+      await loadEmailAccounts()
     }, '删除邮箱账户')
+  } catch (error) {
+    console.error('删除账户失败:', error)
+    message.error('删除失败: ' + (error.message || '未知错误'))
   } finally {
     deleting.value = false
   }
@@ -433,7 +494,15 @@ const saveAccount = async () => {
     saving.value = true
     
     if (editingAccount.value) {
-      await appStore.updateEmailAccount(editingAccount.value.id, currentAccount.value)
+      // 更新账户 - 合并现有账户和表单数据
+      const updatedAccount = {
+        ...editingAccount.value,
+        ...currentAccount.value,
+        id: editingAccount.value.id, // 确保ID不变
+        created_at: editingAccount.value.created_at,
+        updated_at: new Date().toISOString()
+      }
+      await appStore.updateEmailAccount(updatedAccount)
       message.success('账户已更新')
     } else {
       await appStore.addEmailAccount(currentAccount.value)
@@ -442,15 +511,18 @@ const saveAccount = async () => {
     
     showAddModal.value = false
     resetForm()
-    loadEmailAccounts()
+    editingAccount.value = null
+    await loadEmailAccounts()
   } catch (error) {
-    message.error('保存失败')
+    console.error('保存账户失败:', error)
+    message.error('保存失败: ' + (error.message || '未知错误'))
   } finally {
     saving.value = false
   }
 }
 
 const resetForm = () => {
+  editingAccount.value = null
   currentAccount.value = {
     id: 0,
     name: '',
@@ -462,6 +534,11 @@ const resetForm = () => {
     is_active: true,
     created_at: '',
     updated_at: ''
+  }
+  
+  // 清除表单验证状态
+  if (accountFormRef.value) {
+    accountFormRef.value.restoreValidation()
   }
 }
 
@@ -477,6 +554,12 @@ const formatFileSize = (bytes: number): string => {
   const sizes = ['B', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+}
+
+// 关闭模态框
+const closeModal = () => {
+  showAddModal.value = false
+  resetForm()
 }
 </script>
 

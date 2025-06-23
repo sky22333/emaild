@@ -17,14 +17,8 @@ import (
 	"github.com/skratchdot/open-golang/open"
 )
 
-// EmailCheckResult 邮件检查结果
-type EmailCheckResult struct {
-	Account   *models.EmailAccount `json:"account"`
-	NewEmails int                  `json:"new_emails"`
-	PDFsFound int                  `json:"pdfs_found"`
-	Error     string               `json:"error,omitempty"`
-	Success   bool                 `json:"success"`
-}
+// 使用models包中的EmailCheckResult定义
+// 避免重复定义
 
 // App 主应用结构体
 type App struct {
@@ -236,7 +230,7 @@ func (a *App) TestEmailConnectionByID(accountID uint) error {
 // ====================
 
 // CheckAllEmails 检查所有邮箱
-func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
+func (a *App) CheckAllEmails() ([]models.EmailCheckResult, error) {
 	if err := a.ensureServicesReady(); err != nil {
 		return nil, err
 	}
@@ -246,7 +240,7 @@ func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
 		return nil, fmt.Errorf("获取邮箱账户失败: %v", err)
 	}
 
-	results := make([]EmailCheckResult, 0, len(accounts))
+	results := make([]models.EmailCheckResult, 0, len(accounts))
 	
 	for _, account := range accounts {
 		if !account.IsActive {
@@ -255,24 +249,16 @@ func (a *App) CheckAllEmails() ([]EmailCheckResult, error) {
 		
 		// 调用实际的邮件检查逻辑
 		serviceResult := a.emailService.CheckAccountWithResult(&account)
-		// 转换为App包的EmailCheckResult
-		result := EmailCheckResult{
-			Account:   serviceResult.Account,
-			NewEmails: serviceResult.NewEmails,
-			PDFsFound: serviceResult.PDFsFound,
-			Error:     serviceResult.Error,
-			Success:   serviceResult.Success,
-		}
-		results = append(results, result)
+		results = append(results, serviceResult)
 	}
 	
 	return results, nil
 }
 
 // CheckSingleEmail 检查单个邮箱
-func (a *App) CheckSingleEmail(accountID uint) (EmailCheckResult, error) {
+func (a *App) CheckSingleEmail(accountID uint) (models.EmailCheckResult, error) {
 	if err := a.ensureServicesReady(); err != nil {
-		return EmailCheckResult{
+		return models.EmailCheckResult{
 			Error:   err.Error(),
 			Success: false,
 		}, err
@@ -280,7 +266,7 @@ func (a *App) CheckSingleEmail(accountID uint) (EmailCheckResult, error) {
 	
 	account, err := a.db.GetEmailAccountByID(accountID)
 	if err != nil {
-		return EmailCheckResult{
+		return models.EmailCheckResult{
 			Error:   fmt.Sprintf("获取邮箱账户失败: %v", err),
 			Success: false,
 		}, err
@@ -288,15 +274,7 @@ func (a *App) CheckSingleEmail(accountID uint) (EmailCheckResult, error) {
 
 	// 调用实际的邮件检查逻辑
 	serviceResult := a.emailService.CheckAccountWithResult(account)
-	// 转换为App包的EmailCheckResult
-	result := EmailCheckResult{
-		Account:   serviceResult.Account,
-		NewEmails: serviceResult.NewEmails,
-		PDFsFound: serviceResult.PDFsFound,
-		Error:     serviceResult.Error,
-		Success:   serviceResult.Success,
-	}
-	return result, nil
+	return serviceResult, nil
 }
 
 // StartEmailMonitoring 启动邮件监控
@@ -345,44 +323,25 @@ func (a *App) GetDownloadTasksByStatus(status models.DownloadStatus) ([]models.D
 
 // CreateDownloadTask 创建下载任务
 func (a *App) CreateDownloadTask(task models.DownloadTask) error {
-	// 设置任务时间
-	now := time.Now()
-	task.CreatedAt = models.TimeToString(now)
-	task.UpdatedAt = models.TimeToString(now)
+	if err := a.ensureServicesReady(); err != nil {
+		return err
+	}
+
+	// 设置任务状态和时间
 	task.Status = models.StatusPending
-
-	// 保存到数据库
-	tx, err := a.db.DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	query := `
-		INSERT INTO download_tasks (email_id, subject, sender, file_name, file_size, downloaded_size, status, type, source, local_path, progress, speed, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
 	
-	result, err := tx.Exec(query,
-		task.EmailID, task.Subject, task.Sender, task.FileName, task.FileSize,
-		task.DownloadedSize, task.Status, task.Type, task.Source, task.LocalPath,
-		task.Progress, task.Speed, now, now,
-	)
-	if err != nil {
-		return err
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return err
+	// 使用数据库层的方法创建任务
+	if err := a.db.CreateDownloadTask(&task); err != nil {
+		return fmt.Errorf("创建下载任务失败: %v", err)
 	}
 
 	// 启动下载
-	return a.downloadService.StartDownload(uint(id))
+	if err := a.downloadService.StartDownload(task.ID); err != nil {
+		a.logger.Errorf("启动下载任务失败: %v", err)
+		// 不返回错误，因为任务已经创建成功，下载失败可以稍后重试
+	}
+
+	return nil
 }
 
 // PauseDownloadTask 暂停下载任务
@@ -658,27 +617,43 @@ func (a *App) setupTrayCallbacks() {
 	a.trayService.SetCallbacks(
 		func() { // onShow
 			a.logger.Info("显示主窗口")
-			// Wails会自动处理窗口显示
+			a.RestoreFromTray()
 		},
 		func() { // onHide
 			a.logger.Info("隐藏主窗口")
-			// Wails会自动处理窗口隐藏
+			a.MinimizeToTray()
 		},
 		func() { // onCheck
 			a.logger.Info("用户触发邮件检查")
 			go func() {
-				if _, err := a.CheckAllEmails(); err != nil {
+				results, err := a.CheckAllEmails()
+				if err != nil {
 					a.logger.Errorf("手动邮件检查失败: %v", err)
+					a.ShowNotification("邮件检查失败", err.Error())
+				} else {
+					totalEmails := 0
+					totalPDFs := 0
+					for _, result := range results {
+						if result.Success {
+							totalEmails += result.NewEmails
+							totalPDFs += result.PDFsFound
+						}
+					}
+					a.ShowNotification("邮件检查完成", fmt.Sprintf("发现 %d 封新邮件，%d 个PDF文件", totalEmails, totalPDFs))
 				}
 			}()
 		},
 		func() { // onSettings
 			a.logger.Info("打开设置页面")
-			// 前端会处理页面跳转
+			a.RestoreFromTray()
+			// 前端需要实现路由跳转到设置页面
 		},
 		func() { // onQuit
 			a.logger.Info("用户请求退出应用")
-			a.shutdown()
+			go func() {
+				a.shutdown()
+				runtime.Quit(a.ctx)
+			}()
 		},
 	)
 }

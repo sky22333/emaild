@@ -22,14 +22,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// EmailCheckResult 邮件检查结果 - 应该和backend包中的定义保持一致
-type EmailCheckResult struct {
-	Account   *models.EmailAccount `json:"account"`
-	NewEmails int                  `json:"new_emails"`
-	PDFsFound int                  `json:"pdfs_found"`
-	Error     string               `json:"error,omitempty"`
-	Success   bool                 `json:"success"`
-}
+// 使用backend包中的EmailCheckResult类型定义
+// 避免重复定义，直接引用backend.EmailCheckResult
 
 // EmailService 邮件服务结构体
 type EmailService struct {
@@ -76,7 +70,7 @@ func NewEmailService(db *database.Database, downloadService *DownloadService, lo
 		downloadService:  downloadService,
 		ctx:              ctx,
 		cancel:           cancel,
-		checkInterval:    5 * time.Minute, // 默认5分钟检查一次
+		checkInterval:    1 * time.Minute, // 默认1分钟检查一次
 		isRunning:        false,
 		logger:           logger,
 		isShuttingDown:   false,
@@ -314,8 +308,8 @@ func (es *EmailService) getActiveAccounts() ([]models.EmailAccount, error) {
 }
 
 // CheckAccountWithResult 检查指定账户并返回详细结果
-func (es *EmailService) CheckAccountWithResult(account *models.EmailAccount) EmailCheckResult {
-	result := EmailCheckResult{
+func (es *EmailService) CheckAccountWithResult(account *models.EmailAccount) models.EmailCheckResult {
+	result := models.EmailCheckResult{
 		Account:   account,
 		NewEmails: 0,
 		PDFsFound: 0,

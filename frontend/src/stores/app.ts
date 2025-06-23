@@ -51,11 +51,14 @@ export const useAppStore = defineStore('app', () => {
   const error = computed(() => api.error.value)
 
   // 简化的错误处理包装器
-  const safeCall = async <T>(operation: () => Promise<T>): Promise<T | null> => {
+  const safeCall = async <T>(operation: () => Promise<T>, throwOnError = false): Promise<T | null> => {
     try {
       return await operation()
     } catch (error) {
       console.error('API调用失败:', error)
+      if (throwOnError) {
+        throw error
+      }
       return null
     }
   }
@@ -108,7 +111,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   const testEmailConnection = async (account: Omit<EmailAccount, 'id' | 'created_at' | 'updated_at'>) => {
-    return await safeCall(() => api.email.testConnection(account as EmailAccount))
+    return await safeCall(() => api.email.testConnection(account as EmailAccount), true)
   }
 
   const checkAllEmails = async (): Promise<EmailCheckResult[]> => {

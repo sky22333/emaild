@@ -1,43 +1,5 @@
 export namespace backend {
 	
-	export class EmailCheckResult {
-	    account?: models.EmailAccount;
-	    new_emails: number;
-	    pdfs_found: number;
-	    error?: string;
-	    success: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new EmailCheckResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.account = this.convertValues(source["account"], models.EmailAccount);
-	        this.new_emails = source["new_emails"];
-	        this.pdfs_found = source["pdfs_found"];
-	        this.error = source["error"];
-	        this.success = source["success"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class GetDownloadTasksResponse {
 	    tasks: models.DownloadTask[];
 	    total: number;
@@ -228,6 +190,44 @@ export namespace models {
 		}
 	}
 	
+	export class EmailCheckResult {
+	    account?: EmailAccount;
+	    new_emails: number;
+	    pdfs_found: number;
+	    error?: string;
+	    success: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new EmailCheckResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.account = this.convertValues(source["account"], EmailAccount);
+	        this.new_emails = source["new_emails"];
+	        this.pdfs_found = source["pdfs_found"];
+	        this.error = source["error"];
+	        this.success = source["success"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class EmailMessage {
 	    id: number;
 	    email_id: number;

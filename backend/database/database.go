@@ -233,7 +233,7 @@ func (d *Database) createTables() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			download_path TEXT DEFAULT '',
 			max_concurrent INTEGER DEFAULT 3,
-			check_interval INTEGER DEFAULT 300,
+			check_interval INTEGER DEFAULT 60,
 			auto_check BOOLEAN DEFAULT FALSE,
 			minimize_to_tray BOOLEAN DEFAULT TRUE,
 			start_minimized BOOLEAN DEFAULT FALSE,
@@ -296,7 +296,7 @@ func (d *Database) initDefaultConfig() error {
 			INSERT INTO app_configs (download_path, max_concurrent, check_interval, auto_check, 
 			minimize_to_tray, start_minimized, enable_notification, theme, language) 
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			defaultDownloadPath, 3, 300, false, true, false, true, "auto", "zh-CN")
+			defaultDownloadPath, 3, 60, false, true, false, true, "auto", "zh-CN")
 		return err
 	}
 

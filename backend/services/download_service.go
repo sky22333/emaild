@@ -803,12 +803,19 @@ func (ds *DownloadService) createEmailServiceForDownload(ctx context.Context) *E
 	}
 }
 
-// validateUID 验证并记录UID信息，用于调试UID问题
+// validateUID 验证并记录UID信息，用于调试UID问题（改进版）
 func (ds *DownloadService) validateUID(expectedUID, actualUID uint32, operation string) {
 	if actualUID == 0 {
 		ds.logger.Errorf("UID验证失败 - %s: UID为0，可能是Fetch操作缺少imap.FetchUid", operation)
 	} else if expectedUID != actualUID {
 		ds.logger.Warnf("UID不匹配 - %s: 期望=%d, 实际=%d", operation, expectedUID, actualUID)
+		// 注意：UID不匹配在某些IMAP服务器中是正常的，特别是在搜索和获取操作之间
+		// 这可能是由于：
+		// 1. 邮箱状态在搜索和获取之间发生了变化
+		// 2. IMAP服务器实现差异
+		// 3. 搜索使用的是序列号而不是UID
+		// 我们记录警告但允许下载继续进行，使用实际获取到的UID
+		ds.logger.Infof("UID不匹配被容忍，继续使用实际UID: %d", actualUID)
 	} else {
 		ds.logger.Debugf("UID验证成功 - %s: UID=%d", operation, actualUID)
 	}
@@ -855,8 +862,9 @@ func (ds *DownloadService) extractPDFFromEmail(conn *IMAPConnection, uid uint32,
 	messages := make(chan *imap.Message, 1)
 	
 	conn.Mutex.Lock()
-	err := conn.Client.Fetch(seqset, []imap.FetchItem{
-		imap.FetchUid,          // 关键修复：确保获取UID
+	// 关键修复：使用UidFetch而不是Fetch，确保UID一致性
+	err := conn.Client.UidFetch(seqset, []imap.FetchItem{
+		imap.FetchUid,          
 		imap.FetchBodyStructure,
 		imap.FetchEnvelope,
 		"BODY[TEXT]",  // 获取邮件正文
@@ -1470,8 +1478,9 @@ func (ds *DownloadService) fetchPDFPartContent(conn *IMAPConnection, uid uint32,
 	messages := make(chan *imap.Message, 1)
 	
 	conn.Mutex.Lock()
-	err := conn.Client.Fetch(seqset, []imap.FetchItem{
-		imap.FetchUid,  // 关键修复：确保获取UID
+	// 关键修复：使用UidFetch确保UID一致性
+	err := conn.Client.UidFetch(seqset, []imap.FetchItem{
+		imap.FetchUid, 
 		fetchItem,
 	}, messages)
 	conn.Mutex.Unlock()
@@ -1549,7 +1558,7 @@ func (ds *DownloadService) decodeContent(content []byte, encoding string) ([]byt
 	}
 }
 
-// searchEmailsSafely 安全地搜索邮件（避免IMAP literal问题）
+// searchEmailsSafely 安全地搜索邮件（使用UID搜索修复版本）
 func (ds *DownloadService) searchEmailsSafely(conn *IMAPConnection, subject, sender string) ([]uint32, error) {
 	conn.Mutex.Lock()
 	defer conn.Mutex.Unlock()
@@ -1558,18 +1567,19 @@ func (ds *DownloadService) searchEmailsSafely(conn *IMAPConnection, subject, sen
 		return nil, fmt.Errorf("连接已断开")
 	}
 	
-	ds.logger.Infof("开始搜索邮件 - 主题: '%s', 发件人: '%s'", subject, sender)
+	ds.logger.Infof("开始UID搜索邮件 - 主题: '%s', 发件人: '%s'", subject, sender)
 	
 	// 策略1: 如果没有搜索条件，搜索最近的邮件
 	if subject == "" && sender == "" {
 		criteria := imap.NewSearchCriteria()
 		since := time.Now().AddDate(0, 0, -7) // 最近7天
 		criteria.Since = since
-		uids, err := conn.Client.Search(criteria)
+		// 关键修复：使用UidSearch而不是Search
+		uids, err := conn.Client.UidSearch(criteria)
 		if err != nil {
 			return nil, err
 		}
-		ds.logger.Infof("无条件搜索完成 - 找到 %d 封邮件", len(uids))
+		ds.logger.Infof("无条件UID搜索完成 - 找到 %d 封邮件", len(uids))
 		return uids, nil
 	}
 	
@@ -1605,25 +1615,26 @@ func (ds *DownloadService) searchEmailsSafely(conn *IMAPConnection, subject, sen
 		ds.logger.Debugf("使用默认时间范围搜索")
 	}
 	
-	uids, err := conn.Client.Search(criteria)
+	// 关键修复：使用UidSearch而不是Search
+	uids, err := conn.Client.UidSearch(criteria)
 	if err != nil {
 		// 如果搜索失败，尝试最基本的搜索
-		ds.logger.Warnf("搜索失败，尝试基本搜索: %v", err)
+		ds.logger.Warnf("UID搜索失败，尝试基本搜索: %v", err)
 		criteria = imap.NewSearchCriteria()
 		since := time.Now().AddDate(0, 0, -7)
 		criteria.Since = since
-		uids, err = conn.Client.Search(criteria)
+		uids, err = conn.Client.UidSearch(criteria)
 		if err != nil {
-			return nil, fmt.Errorf("所有搜索策略均失败: %v", err)
+			return nil, fmt.Errorf("所有UID搜索策略均失败: %v", err)
 		}
 	}
 	
-	ds.logger.Infof("初始搜索完成 - 找到 %d 封邮件", len(uids))
+	ds.logger.Infof("初始UID搜索完成 - 找到 %d 封邮件", len(uids))
 	
 	// 如果主题包含非ASCII字符，需要在客户端进行过滤
 	if subject != "" && !ds.isASCII(subject) {
 		ds.logger.Infof("开始客户端主题过滤 - 目标主题: '%s'", subject)
-		filteredUIDs, err := ds.filterEmailsBySubject(conn, uids, subject)
+		filteredUIDs, err := ds.filterEmailsBySubjectUID(conn, uids, subject)
 		if err != nil {
 			return nil, err
 		}
@@ -1644,8 +1655,8 @@ func (ds *DownloadService) isASCII(s string) bool {
 	return true
 }
 
-// filterEmailsBySubject 在客户端过滤邮件主题
-func (ds *DownloadService) filterEmailsBySubject(conn *IMAPConnection, uids []uint32, targetSubject string) ([]uint32, error) {
+// filterEmailsBySubjectUID 在客户端过滤邮件主题（使用UID版本）
+func (ds *DownloadService) filterEmailsBySubjectUID(conn *IMAPConnection, uids []uint32, targetSubject string) ([]uint32, error) {
 	if len(uids) == 0 {
 		return uids, nil
 	}
@@ -1663,8 +1674,9 @@ func (ds *DownloadService) filterEmailsBySubject(conn *IMAPConnection, uids []ui
 	done := make(chan error, 1)
 	
 	go func() {
-		done <- conn.Client.Fetch(seqset, []imap.FetchItem{
-			imap.FetchUid,        // 关键修复：确保获取UID
+		// 关键修复：使用UidFetch而不是Fetch
+		done <- conn.Client.UidFetch(seqset, []imap.FetchItem{
+			imap.FetchUid,        
 			imap.FetchEnvelope,
 		}, messages)
 	}()
@@ -1674,7 +1686,6 @@ func (ds *DownloadService) filterEmailsBySubject(conn *IMAPConnection, uids []ui
 		if msg.Envelope != nil && msg.Envelope.Subject != "" {
 			// 比较主题（忽略大小写）
 			if strings.Contains(strings.ToLower(msg.Envelope.Subject), strings.ToLower(targetSubject)) {
-				// 使用正确获取的UID
 				matchedUIDs = append(matchedUIDs, msg.Uid)
 				ds.logger.Debugf("主题匹配成功 - UID: %d, 主题: %s", msg.Uid, msg.Envelope.Subject)
 			}
@@ -1687,6 +1698,11 @@ func (ds *DownloadService) filterEmailsBySubject(conn *IMAPConnection, uids []ui
 	
 	ds.logger.Infof("主题过滤完成 - 输入: %d 封邮件, 匹配: %d 封邮件", len(uids), len(matchedUIDs))
 	return matchedUIDs, nil
+}
+
+// 保持原有方法的兼容性
+func (ds *DownloadService) filterEmailsBySubject(conn *IMAPConnection, uids []uint32, targetSubject string) ([]uint32, error) {
+	return ds.filterEmailsBySubjectUID(conn, uids, targetSubject)
 }
 
 // isFileNameMatch 检查文件名是否匹配（宽松匹配）

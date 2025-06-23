@@ -111,6 +111,15 @@ func TimeToString(t time.Time) string {
 	return t.Format("2006-01-02 15:04:05")
 }
 
+// EmailCheckResult 邮件检查结果
+type EmailCheckResult struct {
+	Account   *EmailAccount `json:"account"`
+	NewEmails int           `json:"new_emails"`
+	PDFsFound int           `json:"pdfs_found"`
+	Error     string        `json:"error,omitempty"`
+	Success   bool          `json:"success"`
+}
+
 // 辅助函数：string 到 time.Time 的转换
 func StringToTime(s string) (time.Time, error) {
 	if s == "" {
